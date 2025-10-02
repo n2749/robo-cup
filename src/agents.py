@@ -423,3 +423,12 @@ class Player(Agent):
         else:
             return Actions.STAY
 
+
+class FieldDistribution():
+    def __init__(self, agents=None):
+        self.agents = agents if agents is not None else []
+
+
+    def add(self, agent: Agent):
+        self.agents.append(agent)
+

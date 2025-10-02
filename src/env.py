@@ -24,13 +24,14 @@ class Environment:
         
         # Goal positions (center of each goal)
         # Center at (0,0), Y goes up, X goes right
-        self.goal_left = np.array([0.0, field_height / 2])
-        self.goal_right = np.array([field_width, field_height / 2])
+        # Goals are at the ends of the field
+        self.goal_left = np.array([-field_width / 2, 0.0])  # Left goal at (-50, 0)
+        self.goal_right = np.array([field_width / 2, 0.0])   # Right goal at (50, 0)
         self.goal_width = 7.32  # FIFA standard goal width
         self.goal_height = 2.44  # For visualization reference
         
         # Game state
-        self.ball_pos = np.array([field_width / 2, field_height / 2])  # Center
+        self.ball_pos = np.zeros(2)  # Center
         self.ball_vel = np.zeros(2)
         self.ball_owner = None  # Agent that has possession
         
@@ -69,21 +70,22 @@ class Environment:
         self.collision_velocity_multiplier = -0.1
         self.min_separation_force = 2.0
         
+
     def reset(self):
         """Reset environment for new episode"""
         # Reset ball to center
-        self.ball_pos = np.array([self.width / 2, self.height / 2])
+        self.ball_pos = np.zeros(2)
         self.ball_vel = np.zeros(2)
         self.ball_owner = None
         
-        # Reset agents to starting positions
+        # Reset agents to starting positions (field center at 0,0)
         for i, agent in enumerate(self.agents):
             if agent.team.name == 'BLUE':
-                # Blue team starts on left side
-                agent.pos = np.array([self.width * 0.25, self.height * (0.3 + 0.4 * (i % 2))])
+                # Blue team starts on left side (negative X)
+                agent.pos = np.array([-self.width * 0.25, (i % 2 - 0.5) * self.height * 0.3])
             else:
-                # White team starts on right side  
-                agent.pos = np.array([self.width * 0.75, self.height * (0.3 + 0.4 * (i % 2))])
+                # White team starts on right side (positive X)  
+                agent.pos = np.array([self.width * 0.25, (i % 2 - 0.5) * self.height * 0.3])
             
             agent.vel = np.zeros(2)
             agent.has_ball = False
@@ -94,9 +96,11 @@ class Environment:
         
         return self._get_observations()
     
+
     def register(self, agent):
         """Register an agent with the environment"""
         self.agents.append(agent)
+
     
     def step(self, actions: List[Actions]) -> Tuple[List, List[float], bool, dict]:
         """
@@ -145,6 +149,7 @@ class Environment:
         
         return observations, rewards, self.episode_done, info
     
+
     def get_beliefs(self, agent) -> dict:
         """Get beliefs for a specific agent based on environment state"""
         # Calculate distances
@@ -189,9 +194,9 @@ class Environment:
             'goal_open': goal_open
         }
     
+
     def _execute_action(self, agent, action: Actions):
         """Execute a single agent's action"""
-        # A1 = FORCE * K1 - V0 * K2
         
         force = np.zeros(2)  # Default no force
         
@@ -201,25 +206,21 @@ class Environment:
             if np.linalg.norm(direction) > 0:
                 direction = direction / np.linalg.norm(direction)
                 force = direction * self.max_force
-        
+                
         elif action == Actions.BLOCK:
-            # Defensive positioning force towards own goal
-            home_goal = np.array([0.0, self.height/2]) if agent.team.name == 'BLUE' else np.array([self.width, self.height/2])
+            # Defensive positioning force towards own goal (consolidated handling)
+            # Blue team defends left goal, White team defends right goal
+            if agent.team.name == 'BLUE':
+                home_goal = self.goal_left
+            else:
+                home_goal = self.goal_right
+                
             direction = home_goal - agent.pos
             distance_to_goal = np.linalg.norm(direction)
             
             if distance_to_goal > 10.0:  # Don't get too close to goal
                 direction = direction / distance_to_goal
-                force = direction * self.max_force * 0.7
-        
-        # A1 = FORCE * K1 - V0 * K2
-        acceleration = force * self.K1 - agent.vel * self.K2
-        
-        # V1 = V0 + A0
-        agent.vel += acceleration
-        
-        # P1 = P0 + V0  
-        agent.pos += agent.vel
+                force = direction * self.max_force * 0.7  # Slower defensive movement
                 
         elif action == Actions.PASS and agent.has_ball:
             # Pass to nearest teammate
@@ -243,34 +244,24 @@ class Environment:
                         agent.has_ball = True
                         self.ball_owner = agent
                         break
-                        
-        elif action == Actions.BLOCK:
-            # Defensive positioning (move towards own goal)
-            home_goal = self.goal_left if agent.team.name == 'BLUE' else self.goal_right
-            direction = home_goal - agent.pos
-            distance_to_goal = np.linalg.norm(direction)
-            
-            if distance_to_goal > 10.0:  # Don't get too close to goal
-                direction = direction / distance_to_goal
-                # Slower movement for defensive positioning
-                acceleration = direction * max_acceleration * 0.7
-                agent.vel += acceleration
-                
-                # Limit velocity
-                if np.linalg.norm(agent.vel) > max_velocity * 0.8:
-                    agent.vel = (agent.vel / np.linalg.norm(agent.vel)) * max_velocity * 0.8
         
         elif action == Actions.STAY:
             # Apply strong damping to slow down
-            agent.vel *= 0.5
+            force = -agent.vel * self.K2 * 2.0  # Extra damping for staying
         
-        # Apply general velocity damping and update position
-        agent.vel *= velocity_damping
+        # A1 = FORCE * K1 - V0 * K2
+        acceleration = force * self.K1 - agent.vel * self.K2
+        
+        # V1 = V0 + A0
+        agent.vel += acceleration
+        
+        # P1 = P0 + V0
         agent.pos += agent.vel
         
         # Very small velocities should be zeroed
         if np.linalg.norm(agent.vel) < 0.1:
             agent.vel = np.zeros(2)
+    
     
     def _pass_ball(self, passer, receiver):
         """Execute a pass between agents"""
@@ -281,6 +272,7 @@ class Environment:
             self.ball_vel = (direction / distance) * min(10.0, distance * 0.5)
             passer.has_ball = False
             self.ball_owner = None
+    
     
     def _shoot_ball(self, shooter, target_pos):
         """Execute a shot towards target"""
@@ -301,6 +293,7 @@ class Environment:
             shooter.has_ball = False
             self.ball_owner = None
     
+    
     def _update_ball_physics(self):
         # P1 = P0 + V0
         self.ball_pos += self.ball_vel
@@ -313,6 +306,7 @@ class Environment:
         # Stop ball if moving very slowly
         if np.linalg.norm(self.ball_vel) < 0.1:
             self.ball_vel = np.zeros(2)
+    
     
     def _update_possession(self):
         """Update which agent has ball possession"""
@@ -328,19 +322,20 @@ class Environment:
     
     def _check_goals(self) -> bool:
         """Check if a goal was scored"""
-        # Left goal (Blue team defends this)
-        if (self.ball_pos[0] <= 0 and 
+        # Left goal at (-50, 0) - Blue team defends this
+        if (self.ball_pos[0] <= -self.width / 2 and 
             abs(self.ball_pos[1] - self.goal_left[1]) <= self.goal_width / 2):
-            self.score['white'] += 1
+            self.score['white'] += 1  # White team scores
             return True
         
-        # Right goal (White team defends this)
-        if (self.ball_pos[0] >= self.width and 
+        # Right goal at (50, 0) - White team defends this  
+        if (self.ball_pos[0] >= self.width / 2 and 
             abs(self.ball_pos[1] - self.goal_right[1]) <= self.goal_width / 2):
-            self.score['blue'] += 1
+            self.score['blue'] += 1  # Blue team scores
             return True
         
         return False
+    
     
     def _apply_repulsion_forces(self):
         """
@@ -381,6 +376,7 @@ class Environment:
                 
                 # Add to agent velocity
                 agent1.vel += repulsion_force * 0.3  # Scale down the effect
+    
     
     def _handle_collisions(self):
         """
@@ -430,11 +426,13 @@ class Environment:
                     self._handle_collision_ball_transfer(agent1, agent2, normal)
                     
                     # Track collision for rewards/statistics
+                    collision_force = separation_force  # Use separation force as collision magnitude
                     self.collisions_this_step.append({
                         'agents': (agent1, agent2),
                         'position': (agent1.pos + agent2.pos) / 2,
-                        'force': np.linalg.norm(impulse)
+                        'force': collision_force
                     })
+    
     
     def _handle_collision_ball_transfer(self, agent1, agent2, collision_normal):
         """
@@ -470,39 +468,45 @@ class Environment:
                 self.ball_owner = agent1
                 self.ball_pos = agent1.pos.copy()
     
+    
     def _enforce_boundaries(self):
         """Keep ball and agents within field boundaries with collision response"""
-        # Ball boundaries with bounce
-        if self.ball_pos[0] <= 0 or self.ball_pos[0] >= self.width:
-            self.ball_vel[0] *= -0.8  # Bounce with energy loss
-            self.ball_pos[0] = np.clip(self.ball_pos[0], 0, self.width)
+        # Field boundaries: Center at (0,0), so field goes from -50 to +50 in X, -32.5 to +32.5 in Y
+        min_x, max_x = -self.width / 2, self.width / 2
+        min_y, max_y = -self.height / 2, self.height / 2
         
-        if self.ball_pos[1] <= 0 or self.ball_pos[1] >= self.height:
+        # Ball boundaries with bounce
+        if self.ball_pos[0] <= min_x or self.ball_pos[0] >= max_x:
+            self.ball_vel[0] *= -0.8  # Bounce with energy loss
+            self.ball_pos[0] = np.clip(self.ball_pos[0], min_x, max_x)
+        
+        if self.ball_pos[1] <= min_y or self.ball_pos[1] >= max_y:
             self.ball_vel[1] *= -0.8  # Bounce with energy loss
-            self.ball_pos[1] = np.clip(self.ball_pos[1], 0, self.height)
+            self.ball_pos[1] = np.clip(self.ball_pos[1], min_y, max_y)
         
         # Agent boundaries with collision response
         for agent in self.agents:
             # Handle boundary collisions for agents
-            if agent.pos[0] <= self.agent_radius:
-                agent.pos[0] = self.agent_radius
+            if agent.pos[0] <= min_x + self.agent_radius:
+                agent.pos[0] = min_x + self.agent_radius
                 if agent.vel[0] < 0:
                     agent.vel[0] *= -0.5  # Bounce back with damping
                     
-            elif agent.pos[0] >= self.width - self.agent_radius:
-                agent.pos[0] = self.width - self.agent_radius
+            elif agent.pos[0] >= max_x - self.agent_radius:
+                agent.pos[0] = max_x - self.agent_radius
                 if agent.vel[0] > 0:
                     agent.vel[0] *= -0.5
             
-            if agent.pos[1] <= self.agent_radius:
-                agent.pos[1] = self.agent_radius
+            if agent.pos[1] <= min_y + self.agent_radius:
+                agent.pos[1] = min_y + self.agent_radius
                 if agent.vel[1] < 0:
                     agent.vel[1] *= -0.5
                     
-            elif agent.pos[1] >= self.height - self.agent_radius:
-                agent.pos[1] = self.height - self.agent_radius
+            elif agent.pos[1] >= max_y - self.agent_radius:
+                agent.pos[1] = max_y - self.agent_radius
                 if agent.vel[1] > 0:
                     agent.vel[1] *= -0.5
+    
     
     def _calculate_rewards(self, actions: List[Actions], goal_scored: bool) -> List[float]:
         """Calculate rewards for each agent including collision penalties"""
@@ -592,6 +596,7 @@ class Environment:
             rewards.append(reward)
         
         return rewards
+    
     
     def _get_observations(self) -> List[dict]:
         """Get observations for all agents"""
