@@ -10,22 +10,20 @@ class Environment:
     Simulates a simplified 2D soccer field with ball physics and game rules.
     """
     
-    def __init__(self, field_width: float = 105.0, field_height: float = 68.0):
+    def __init__(self, field_width: float = 100.0, field_height: float = 65.0):
         """
-        Initialize football environment with FIFA standard dimensions.
-        
-        FIFA Standard Field Dimensions:
-        - Length: 100-110m (using 105m)
-        - Width: 64-75m (using 68m)
-        - Goal: 7.32m wide x 2.44m high
-        - Penalty area: 40.3m x 16.5m
-        - Center circle: 9.15m radius
+        Field Dimensions:
+        - Soccer field is 2D rectangular, 100 x 65 meters
+        - Center at (0,0), Y goes up, X goes right
+        - Movements simulated stepwise for every 50 milliseconds (20 steps/sec)
+        - Players and ball treated as circles
         """
         # Field dimensions (in meters)
         self.width = field_width
         self.height = field_height
         
         # Goal positions (center of each goal)
+        # Center at (0,0), Y goes up, X goes right
         self.goal_left = np.array([0.0, field_height / 2])
         self.goal_right = np.array([field_width, field_height / 2])
         self.goal_width = 7.32  # FIFA standard goal width
@@ -39,9 +37,10 @@ class Environment:
         # Registered agents
         self.agents = []
         
-        # Game statistics
-        self.episode_length = 500  # Longer episodes for 11v11 (about 5 minutes at 10fps)
+        self.timestep_ms = 50  # 50 milliseconds per step
+        self.episode_length = 600  # 30 seconds at 20 steps/sec (600 steps)
         self.current_step = 0
+        self.current_time = 0.0  # Time in seconds
         self.score = {'blue': 0, 'white': 0}
         self.episode_done = False
         
@@ -54,15 +53,20 @@ class Environment:
         self.center_circle_radius = 9.15
         self.corner_arc_radius = 1.0
         
-        # Physics parameters (scaled for football)
-        self.ball_friction = 0.98  # Grass friction
+        # Movement: P1 = P0 + V0; V1 = V0 + A0; A1 = FORCE * K1 - V0 * K2
+        self.K1 = 0.1  # Force scaling factor
+        self.K2 = 0.05  # Velocity damping factor
+        self.max_force = 10.0  # Maximum force agents can apply
+        
+        # Ball physics parameters
+        self.ball_friction_factor = 0.02  # FRICTIONFACTOR for ball
+        self.kick_force_multiplier = 1.0  # KICKFORCE * K1
         self.max_ball_speed = 25.0  # Realistic ball speed (m/s)
         self.possession_distance = 1.5  # Distance to control ball
         
         # Collision parameters
         self.agent_radius = 1.5
-        self.collision_elasticity = 0.4
-        self.collision_damping = 0.6
+        self.collision_velocity_multiplier = -0.1
         self.min_separation_force = 2.0
         
     def reset(self):
@@ -85,6 +89,7 @@ class Environment:
             agent.has_ball = False
             
         self.current_step = 0
+        self.current_time = 0.0
         self.episode_done = False
         
         return self._get_observations()
@@ -104,6 +109,7 @@ class Environment:
             observations, rewards, done, info
         """
         self.current_step += 1
+        self.current_time += self.timestep_ms / 1000.0
         
         # Reset collision tracking
         self.collisions_this_step = []
@@ -184,23 +190,36 @@ class Environment:
         }
     
     def _execute_action(self, agent, action: Actions):
-        """Execute a single agent's action with physics-based movement"""
-        max_acceleration = 1.5
-        max_velocity = 3.0
-        velocity_damping = 0.9
+        """Execute a single agent's action"""
+        # A1 = FORCE * K1 - V0 * K2
+        
+        force = np.zeros(2)  # Default no force
         
         if action == Actions.MOVE:
-            # Move towards ball with acceleration
+            # Move towards ball with force
             direction = self.ball_pos - agent.pos
             if np.linalg.norm(direction) > 0:
                 direction = direction / np.linalg.norm(direction)
-                # Apply acceleration towards target
-                acceleration = direction * max_acceleration
-                agent.vel += acceleration
-                
-                # Limit maximum velocity
-                if np.linalg.norm(agent.vel) > max_velocity:
-                    agent.vel = (agent.vel / np.linalg.norm(agent.vel)) * max_velocity
+                force = direction * self.max_force
+        
+        elif action == Actions.BLOCK:
+            # Defensive positioning force towards own goal
+            home_goal = np.array([0.0, self.height/2]) if agent.team.name == 'BLUE' else np.array([self.width, self.height/2])
+            direction = home_goal - agent.pos
+            distance_to_goal = np.linalg.norm(direction)
+            
+            if distance_to_goal > 10.0:  # Don't get too close to goal
+                direction = direction / distance_to_goal
+                force = direction * self.max_force * 0.7
+        
+        # A1 = FORCE * K1 - V0 * K2
+        acceleration = force * self.K1 - agent.vel * self.K2
+        
+        # V1 = V0 + A0
+        agent.vel += acceleration
+        
+        # P1 = P0 + V0  
+        agent.pos += agent.vel
                 
         elif action == Actions.PASS and agent.has_ball:
             # Pass to nearest teammate
@@ -272,14 +291,24 @@ class Environment:
             # Add some randomness to shots
             noise = np.random.normal(0, 0.2, 2)
             direction = (direction / distance) + noise
-            self.ball_vel = direction * min(self.max_ball_speed, 8.0 + distance * 0.1)
+            
+            # If kicked, A1 = KICKFORCE * K1; V1 = 0
+            kick_force = min(self.max_ball_speed, 8.0 + distance * 0.1)
+            kick_acceleration = kick_force * self.kick_force_multiplier
+            
+            # Ball starts from rest when kicked (V1 = 0 initially, then gets acceleration)
+            self.ball_vel = direction * kick_acceleration
             shooter.has_ball = False
             self.ball_owner = None
     
     def _update_ball_physics(self):
-        """Update ball position and velocity"""
+        # P1 = P0 + V0
         self.ball_pos += self.ball_vel
-        self.ball_vel *= self.ball_friction  # Apply friction
+        
+        # V1 = V0 + A0
+        # A1 = -FRICTIONFACTOR * V0 (when not kicked)
+        friction_acceleration = -self.ball_friction_factor * self.ball_vel
+        self.ball_vel += friction_acceleration
         
         # Stop ball if moving very slowly
         if np.linalg.norm(self.ball_vel) < 0.1:
@@ -387,15 +416,9 @@ class Environment:
                     if velocity_along_normal > 0:
                         continue
                     
-                    # Apply collision elasticity and damping
-                    restitution = self.collision_elasticity
-                    impulse_scalar = -(1 + restitution) * velocity_along_normal
-                    impulse = impulse_scalar * normal
-                    
-                    # Apply impulse to velocities (assuming equal mass)
-                    mass_ratio = 0.5  # Equal mass distribution
-                    agent1.vel -= impulse * mass_ratio * self.collision_damping
-                    agent2.vel += impulse * mass_ratio * self.collision_damping
+                    # multiply velocities by -0.1 after collision
+                    agent1.vel *= self.collision_velocity_multiplier
+                    agent2.vel *= self.collision_velocity_multiplier
                     
                     # Add small random perturbation to prevent agents getting stuck
                     if distance < min_distance * 0.9:

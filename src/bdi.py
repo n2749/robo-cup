@@ -1,11 +1,14 @@
 from enum import Enum
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+import numpy as np
 
 
 class Beliefs:
     """
-    Represents an agent's beliefs about the current state of the soccer environment.
-    These beliefs are used both for BDI reasoning and as state representation for Q-learning.
+    Represents an agent's beliefs about the current state of the soccer
+    environment. Enhanced with confidence tracking and temporal updates. These
+    beliefs are used both for BDI reasoning and as state representation for
+    Q-learning.
     """
     
     def __init__(self):
@@ -25,6 +28,27 @@ class Beliefs:
         self.in_attacking_third: bool = False
         self.in_defensive_third: bool = False
         self.opponent_threatening: bool = False
+        
+        # World model with confidence tracking
+        # Ball tracking with confidence
+        self.wm_ball: Optional[np.ndarray] = None  # μglobal position
+        self.wm_ball_confidence: float = 1.0  # σsum_ball
+        self.wm_ball_timestamp: float = 0.0  # τsum_ball
+        self.saw_ball: bool = False  # sum_sawball
+        
+        # Opponent tracking with confidence  
+        self.wm_opponents: List[dict] = []  # List of opponent observations
+        self.wm_teammates: List[dict] = []  # List of teammate observations
+        
+        # Vision and localization
+        self.wm_position: Optional[np.ndarray] = None  # Robot position
+        self.wm_heading: Optional[float] = None  # Robot heading
+        
+        # Temporal parameters
+        self.current_time: float = 0.0  # τcurrent
+        self.confidence_threshold: float = 0.5  # σthreshold
+        self.time_threshold: float = 5.0  # τthreshold
+        self.small_error: float = 0.1  # SMALL_ERROR
         
     def update(self, belief_dict: Dict[str, Any]):
         """
@@ -67,8 +91,207 @@ class Beliefs:
             'team_has_possession': self.team_has_possession,
             'in_attacking_third': self.in_attacking_third,
             'in_defensive_third': self.in_defensive_third,
-            'opponent_threatening': self.opponent_threatening
+            'opponent_threatening': self.opponent_threatening,
+            'wm_ball': self.wm_ball.tolist() if self.wm_ball is not None else None,
+            'wm_ball_confidence': self.wm_ball_confidence,
+            'current_time': self.current_time
         }
+    
+    def update_world_model(self, robot_position: np.ndarray, robot_angle: float, 
+                          ball_pos: Optional[np.ndarray], op_pos: List[np.ndarray], 
+                          current_time: float):
+        """
+        UPDATEWORLDMODEL procedure
+        
+        Args:
+            robot_position: Robot position
+            robot_angle: Robot heading angle
+            ball_pos: Observed ball position (None if not seen)
+            op_pos: List of observed opponent positions
+            current_time: Current simulation time
+        """
+        self.current_time = current_time
+        
+        # UPDATELOCALIZATION
+        self._update_localization(robot_position, robot_angle)
+        
+        # UPDATEVISION
+        self._update_vision(ball_pos, op_pos, current_time)
+        
+        # UPDATESHAREDINFORMATION
+        self._update_shared_information(current_time)
+        
+        # UPDATETIME
+        self._update_time(current_time)
+    
+    def _update_localization(self, robot_position: np.ndarray, robot_angle: float):
+        """
+        UPDATELOCALIZATION procedure - simply copies localization info.
+        """
+        self.wm_position = robot_position.copy()
+        self.wm_heading = robot_angle
+    
+    def _update_vision(self, ball_pos: Optional[np.ndarray], op_pos: List[np.ndarray], 
+                      current_time: float):
+        """
+        UPDATEVISION procedure.
+        Updates ball and opponent positions from vision module.
+        """
+        # Update ball position
+        if ball_pos is not None:
+            # Convert to global coordinates
+            mu_global = self.wm_position + self._rotate(ball_pos, self.wm_heading)
+            sigma_global = self.small_error  # SMALL_ERROR
+            
+            # MERGE with existing ball belief
+            self.wm_ball = self._merge_position(self.wm_ball, mu_global, 
+                                              self.wm_ball_confidence, sigma_global)
+            self.wm_ball_confidence = sigma_global
+            self.wm_ball_timestamp = current_time
+            self.saw_ball = True
+        
+        # Update opponent positions
+        for i, op_position in enumerate(op_pos):
+            mu_global = self.wm_position + self._rotate(op_position, self.wm_heading)
+            
+            # Find closest existing opponent belief
+            best_match_idx = -1
+            min_distance = float('inf')
+            
+            for j, existing_opp in enumerate(self.wm_opponents):
+                if 'position' in existing_opp:
+                    dist = np.linalg.norm(existing_opp['position'] - mu_global)
+                    if dist < min_distance:
+                        min_distance = dist
+                        best_match_idx = j
+            
+            op_threshold = 5.0  # OP_THRESHOLD
+            
+            if min_distance < op_threshold:
+                # Update existing opponent
+                sigma_global = self.small_error
+                self.wm_opponents[best_match_idx] = {
+                    'position': self._merge_position(
+                        self.wm_opponents[best_match_idx]['position'],
+                        mu_global, 
+                        self.wm_opponents[best_match_idx].get('confidence', 1.0),
+                        sigma_global
+                    ),
+                    'confidence': sigma_global,
+                    'timestamp': current_time
+                }
+            else:
+                # Find oldest opponent to replace or add new
+                if len(self.wm_opponents) < 11:  # Max opponents in 11v11
+                    self.wm_opponents.append({
+                        'position': mu_global,
+                        'confidence': self.small_error,
+                        'timestamp': current_time
+                    })
+                else:
+                    # Replace oldest
+                    oldest_idx = min(range(len(self.wm_opponents)),
+                                   key=lambda k: self.wm_opponents[k].get('timestamp', 0))
+                    self.wm_opponents[oldest_idx] = {
+                        'position': mu_global,
+                        'confidence': self.small_error,
+                        'timestamp': current_time
+                    }
+    
+    def _update_shared_information(self, current_time: float):
+        """
+        Request ball location from shared world model if not seen recently.
+        """
+        # Check if ball hasn't been seen in a long time
+        if current_time - self.wm_ball_timestamp > self.time_threshold:
+            # Request from shared world model
+            shared_ball = self.get_ball_location(current_time, robot_id=id(self))
+            
+            if shared_ball is not None:
+                self.wm_ball = self._merge_position(self.wm_ball, shared_ball['position'],
+                                                  self.wm_ball_confidence, 
+                                                  shared_ball['confidence'])
+                self.wm_ball_confidence = shared_ball['confidence']
+                self.wm_ball_timestamp = current_time
+    
+    def _update_time(self, current_time: float):
+        """
+        Add error to standard deviations of objects not updated this time period.
+        """
+        # Update ball confidence if not seen this timestep
+        if self.wm_ball_timestamp != current_time:
+            self.wm_ball_confidence += self.small_error
+        
+        # Update opponent confidences
+        for opponent in self.wm_opponents:
+            if opponent.get('timestamp', 0) != current_time:
+                opponent['confidence'] = opponent.get('confidence', 1.0) + self.small_error
+    
+    def get_ball_location(self, current_time: float, robot_id: int) -> Optional[dict]:
+        """
+        Get best ball location from shared world model.
+        
+        Args:
+            current_time: Current time
+            robot_id: ID of requesting robot
+            
+        Returns:
+            Dictionary with ball position and confidence, or None
+        """
+        # This would typically query other agents or a shared world model
+        # For now, return None (no shared information available)
+        # In a full implementation, this would iterate through all agents
+        # and find the one with the most confident ball observation
+        return None
+    
+    def is_valid_observation(self, timestamp: float, confidence: float, 
+                           current_time: float, saw_ball: bool) -> bool:
+        """
+        Args:
+            timestamp: When observation was made
+            confidence: Confidence of observation
+            current_time: Current time
+            saw_ball: Whether ball was actually seen
+            
+        Returns:
+            True if observation is valid
+        """
+        # Time freshness check
+        if current_time - timestamp > self.time_threshold:
+            return False
+        
+        # Confidence check
+        if confidence > self.confidence_threshold:
+            return False
+        
+        # Data integrity check
+        if not saw_ball:
+            return False
+        
+        return True
+    
+    def _rotate(self, vector: np.ndarray, angle: float) -> np.ndarray:
+        """
+        ROTATE function for coordinate transformation.
+        """
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        return rotation_matrix @ vector
+    
+    def _merge_position(self, pos1: Optional[np.ndarray], pos2: np.ndarray, 
+                       conf1: float, conf2: float) -> np.ndarray:
+        """
+        MERGE function for combining position estimates with confidence weighting.
+        """
+        if pos1 is None:
+            return pos2.copy()
+        
+        # Weight by inverse confidence (lower confidence = higher weight)
+        w1 = 1.0 / (conf1 + 1e-6)
+        w2 = 1.0 / (conf2 + 1e-6)
+        total_weight = w1 + w2
+        
+        return (pos1 * w1 + pos2 * w2) / total_weight
 
 
 class Desires:

@@ -54,6 +54,7 @@ class Agent(ABC):
         self.episode_rewards = []
         self.actions_taken = []
         
+    
     def perceive(self):
         """
         Perceive environment and update beliefs through BDI reasoning.
@@ -65,8 +66,30 @@ class Agent(ABC):
         observations['has_ball'] = self.has_ball
         observations['team_has_ball'] = any(agent.has_ball for agent in self.env.agents if agent.team == self.team)
         
+        # Simulate vision system - ball position (None if not "seen")
+        ball_pos = None
+        if np.linalg.norm(self.pos - self.env.ball_pos) < 20.0:  # Vision range
+            # Convert to local coordinates for vision simulation
+            ball_pos = self.env.ball_pos - self.pos
+        
+        # Simulate opponent positions in vision
+        op_positions = []
+        for agent in self.env.agents:
+            if agent.team != self.team and np.linalg.norm(self.pos - agent.pos) < 25.0:
+                # Local coordinates
+                op_positions.append(agent.pos - self.pos)
+        
+        self.beliefs.update_world_model(
+            robot_position=self.pos,
+            robot_angle=0.0,  # Simplified - no heading in current system
+            ball_pos=ball_pos,
+            op_pos=op_positions,
+            current_time=self.env.current_time
+        )
+        
         # Update beliefs through BDI reasoning engine
         self.beliefs = self.reasoning_engine.revise_beliefs(self.beliefs, observations)
+    
     
     def deliberate(self) -> List[Actions]:
         """
@@ -83,6 +106,7 @@ class Agent(ABC):
         
         return filtered_options if filtered_options else [Actions.MOVE, Actions.STAY]
     
+
     def plan(self, viable_actions: List[Actions], greedy: bool = False) -> Actions:
         """
         Select action using Q-learning with BDI bias.
@@ -131,6 +155,7 @@ class Agent(ABC):
         
         return selected_action
     
+    
     def act(self) -> Actions:
         """
         Execute the BDI reasoning cycle and return selected action.
@@ -155,6 +180,7 @@ class Agent(ABC):
         self.intentions.decay_commitment()
         
         return selected_action
+    
     
     def learn(self, reward: float, done: bool = False):
         """
@@ -182,6 +208,7 @@ class Agent(ABC):
                 self.cumulative_reward = 0.0
                 self.q_policy.end_episode()
     
+    
     def reset_episode(self):
         """
         Reset agent state for new episode.
@@ -192,6 +219,7 @@ class Agent(ABC):
         self.has_ball = False
         self.intentions = Intentions()
         self.actions_taken = []
+    
     
     def get_stats(self) -> dict:
         """
@@ -227,6 +255,7 @@ class Defender(Agent):
         self.desires.score_goal = 0.3
         self.desires.take_risks = 0.2
     
+    
     def deliberate(self) -> List[Actions]:
         """
         Defender-specific deliberation with focus on defensive actions.
@@ -256,6 +285,7 @@ class Attacker(Agent):
         self.desires.create_opportunities = 0.8
         self.desires.defend_goal = 0.4
         self.desires.take_risks = 0.7
+    
     
     def deliberate(self) -> List[Actions]:
         """
@@ -303,6 +333,7 @@ class Goalkeeper(Agent):
         self.desires.take_risks = 0.1
         self.desires.maintain_position = 0.9
     
+    
     def deliberate(self) -> List[Actions]:
         """
         Goalkeeper-specific deliberation focused on goal protection.
@@ -312,4 +343,83 @@ class Goalkeeper(Agent):
             return [Actions.BLOCK, Actions.TACKLE, Actions.STAY]
         else:
             return [Actions.MOVE, Actions.STAY]
+
+
+class FreeKickTaker(Agent):
+    """
+    Role: take-corner, Strategy: pass
+    """
+    
+    def __init__(self, env, team: Team, pos=np.zeros(2)):
+        super().__init__(env, team, role="free-kick-taker", pos=pos)
+        
+        # Free-kick-taker specific desires
+        self.desires.keep_possession = 1.0
+        self.desires.support_teammate = 0.9
+        self.desires.create_opportunities = 0.8
+        self.desires.take_risks = 0.3
+        
+    def deliberate(self) -> List[Actions]:
+        """
+        Free-kick-taker deliberation - focused on passing and corner kicks.
+        """
+        options = super().deliberate()
+        
+        # Prioritize passing for set pieces
+        if self.beliefs.has_ball_possession:
+            return [Actions.PASS, Actions.MOVE, Actions.STAY]
+        else:
+            return options
+    
+    def take_corner(self):
+        """
+        Execute corner kick - specialized set piece behavior.
+        """
+        # This would be called during corner kick situations
+        # Find best teammate to pass to
+        teammates = [a for a in self.env.agents if a.team == self.team and a != self]
+        if teammates and self.has_ball:
+            # Strategic corner kick pass
+            best_target = max(teammates, key=lambda tm: tm.desires.score_goal)
+            self.env._pass_ball(self, best_target)
+
+
+class Player(Agent):
+    """
+    Role: position, move-ball, Strategies: go-zone, pass
+    """
+    
+    def __init__(self, env, team: Team, pos=np.zeros(2)):
+        super().__init__(env, team, role="player", pos=pos)
+        
+        # General player desires - balanced
+        self.desires.keep_possession = 0.8
+        self.desires.support_teammate = 0.7
+        self.desires.move_towards_ball = 0.6
+        self.desires.maintain_position = 0.5
+        
+    def deliberate(self) -> List[Actions]:
+        """
+        General player deliberation - balanced approach.
+        """
+        options = super().deliberate()
+        
+        # Add positional play
+        if not self.beliefs.has_ball_possession:
+            # Go to zone strategy
+            return [Actions.MOVE, Actions.PASS, Actions.STAY]
+        else:
+            # Ball possession - pass or move
+            return [Actions.PASS, Actions.MOVE, Actions.SHOOT]
+    
+    def go_zone(self, target_zone: np.ndarray):
+        """
+        Go-zone strategy - move to tactical position.
+        """
+        # Move towards assigned tactical zone
+        direction = target_zone - self.pos
+        if np.linalg.norm(direction) > 2.0:  # If not in position
+            return Actions.MOVE
+        else:
+            return Actions.STAY
 
