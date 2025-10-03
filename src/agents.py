@@ -30,8 +30,7 @@ class Agent(ABC):
         
         # BDI components
         self.beliefs = Beliefs()
-        self.desires = Desires()
-        self.desires.update_based_on_role(role)  # Configure desires based on role
+        self.desires = Desires(role=role)  # Dynamic desires based on role
         self.intentions = Intentions()
         self.reasoning_engine = BDIReasoningEngine()
         
@@ -165,6 +164,11 @@ class Agent(ABC):
         """
         # BDI reasoning cycle
         self.perceive()
+        
+        # Update desires dynamically based on current game state
+        game_info = self._get_game_info()
+        self.desires.update_desires_based_on_game_state(self.beliefs, game_info)
+        
         viable_actions = self.deliberate()
         selected_action = self.plan(viable_actions)
         
@@ -180,6 +184,42 @@ class Agent(ABC):
         self.intentions.decay_commitment()
         
         return selected_action
+    
+    def _get_game_info(self) -> dict:
+        """
+        Get current game information for dynamic desire updates.
+        
+        Returns:
+            Dictionary with game state information
+        """
+        if not self.env:
+            return {'my_team_score': 0, 'opponent_score': 0, 'time_remaining': 1.0, 'ball_possession': None}
+        
+        # Determine team scores
+        if self.team.name == 'BLUE':
+            my_score = self.env.score['blue']
+            opponent_score = self.env.score['white']
+        else:
+            my_score = self.env.score['white']
+            opponent_score = self.env.score['blue']
+        
+        # Calculate time remaining (0.0 = end of game, 1.0 = start of game)
+        time_remaining = max(0.0, 1.0 - (self.env.current_step / self.env.episode_length))
+        
+        # Determine ball possession
+        ball_possession = None
+        if self.env.ball_owner:
+            if self.env.ball_owner.team == self.team:
+                ball_possession = 'my_team'
+            else:
+                ball_possession = 'opponent'
+        
+        return {
+            'my_team_score': my_score,
+            'opponent_score': opponent_score,
+            'time_remaining': time_remaining,
+            'ball_possession': ball_possession
+        }
     
     
     def learn(self, reward: float, done: bool = False):
@@ -243,17 +283,12 @@ class Agent(ABC):
 class Defender(Agent):
     """
     Defender agent with defensive-focused desires and behaviors.
+    Desires are now dynamically managed by the BDI system.
     """
     
     def __init__(self, env, team: Team, pos=np.zeros(2)):
         super().__init__(env, team, role="defender", pos=pos)
-        
-        # Enhance defensive desires
-        self.desires.defend_goal = 1.0
-        self.desires.steal_ball = 0.9
-        self.desires.block_opponent = 0.8
-        self.desires.score_goal = 0.3
-        self.desires.take_risks = 0.2
+        # Desires are dynamically set based on role and game state
     
     
     def deliberate(self) -> List[Actions]:
@@ -274,17 +309,12 @@ class Defender(Agent):
 class Attacker(Agent):
     """
     Attacker agent with offensive-focused desires and behaviors.
+    Desires are now dynamically managed by the BDI system.
     """
     
     def __init__(self, env, team: Team, pos=np.zeros(2)):
         super().__init__(env, team, role="attacker", pos=pos)
-        
-        # Enhance offensive desires
-        self.desires.score_goal = 1.0
-        self.desires.move_towards_ball = 0.9
-        self.desires.create_opportunities = 0.8
-        self.desires.defend_goal = 0.4
-        self.desires.take_risks = 0.7
+        # Desires are dynamically set based on role and game state
     
     
     def deliberate(self) -> List[Actions]:
@@ -305,33 +335,23 @@ class Attacker(Agent):
 class Midfielder(Agent):
     """
     Midfielder agent with balanced desires and tactical focus.
+    Desires are now dynamically managed by the BDI system.
     """
     
     def __init__(self, env, team: Team, pos=np.zeros(2)):
         super().__init__(env, team, role="midfielder", pos=pos)
-        
-        # Balanced desires
-        self.desires.keep_possession = 0.9
-        self.desires.support_teammate = 0.8
-        self.desires.create_opportunities = 0.7
-        self.desires.take_risks = 0.5
+        # Desires are dynamically set based on role and game state
 
 
 class Goalkeeper(Agent):
     """
     Goalkeeper agent with specialized defensive behaviors.
+    Desires are now dynamically managed by the BDI system.
     """
     
     def __init__(self, env, team: Team, pos=np.zeros(2)):
         super().__init__(env, team, role="goalkeeper", pos=pos)
-        
-        # Goalkeeper-specific desires
-        self.desires.defend_goal = 1.0
-        self.desires.block_opponent = 1.0
-        self.desires.steal_ball = 0.6
-        self.desires.score_goal = 0.0  # Goalkeepers don't score
-        self.desires.take_risks = 0.1
-        self.desires.maintain_position = 0.9
+        # Desires are dynamically set based on role and game state
     
     
     def deliberate(self) -> List[Actions]:
