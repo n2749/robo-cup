@@ -1,7 +1,10 @@
 import numpy as np
 import random
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, TYPE_CHECKING
 from bdi import Actions
+
+if TYPE_CHECKING:
+    from agents import Team
 
 
 class Environment:
@@ -54,16 +57,23 @@ class Environment:
         self.center_circle_radius = 9.15
         self.corner_arc_radius = 1.0
         
+        # Set piece state
+        self.set_piece_type = None  # 'corner_kick', 'throw_in', 'goal_kick', None
+        self.set_piece_team = None  # Team that gets the set piece
+        self.set_piece_position = None  # Where the set piece happens
+        self.set_piece_timer = 0  # Countdown before resuming play
+        self.set_piece_duration = 100  # Steps to position before resuming (5 seconds at 20Hz, increased from 40)
+        
         # Movement: P1 = P0 + V0; V1 = V0 + A0; A1 = FORCE * K1 - V0 * K2
-        self.K1 = 0.1  # Force scaling factor
-        self.K2 = 0.05  # Velocity damping factor
-        self.max_force = 10.0  # Maximum force agents can apply
+        self.K1 = 0.05  # Force scaling factor (slightly increased for better control)
+        self.K2 = 0.12  # Velocity damping factor (more damping for stability)
+        self.max_force = 6.0  # Maximum force agents can apply (slightly increased)
         
         # Ball physics parameters
-        self.ball_friction_factor = 0.02  # FRICTIONFACTOR for ball
-        self.kick_force_multiplier = 1.0  # KICKFORCE * K1
-        self.max_ball_speed = 25.0  # Realistic ball speed (m/s)
-        self.possession_distance = 1.5  # Distance to control ball
+        self.ball_friction_factor = 0.06  # FRICTIONFACTOR for ball (more friction)
+        self.kick_force_multiplier = 0.7  # KICKFORCE * K1 (slightly increased)
+        self.max_ball_speed = 18.0  # Realistic ball speed (m/s) (slightly increased)
+        self.possession_distance = 2.0  # Distance to control ball (increased for easier possession)
         
         # Collision parameters
         self.agent_radius = 1.5
@@ -94,6 +104,12 @@ class Environment:
         self.current_time = 0.0
         self.episode_done = False
         
+        # Reset set piece state
+        self.set_piece_type = None
+        self.set_piece_team = None
+        self.set_piece_position = None
+        self.set_piece_timer = 0
+        
         return self._get_observations()
     
 
@@ -118,19 +134,29 @@ class Environment:
         # Reset collision tracking
         self.collisions_this_step = []
         
-        # Execute actions for each agent
-        for agent, action in zip(self.agents, actions):
-            self._execute_action(agent, action)
+        goal_scored = False
         
-        # Update physics
-        self._update_ball_physics()
-        self._apply_repulsion_forces()  # Apply spacing forces
-        self._handle_collisions()  # Handle agent-agent collisions
-        self._update_possession()
-        
-        # Check for goals and boundaries
-        goal_scored = self._check_goals()
-        self._enforce_boundaries()
+        # Handle set pieces
+        if self.set_piece_type is not None:
+            self._handle_set_piece(actions)
+        else:
+            # Normal play
+            # Execute actions for each agent
+            for agent, action in zip(self.agents, actions):
+                self._execute_action(agent, action)
+            
+            # Update physics
+            self._update_ball_physics()
+            self._apply_repulsion_forces()  # Apply spacing forces
+            self._handle_collisions()  # Handle agent-agent collisions
+            self._update_possession()
+            
+            # Check for goals FIRST (before out of bounds check)
+            goal_scored = self._check_goals()
+            
+            # Only check out of bounds if no goal was scored
+            if not goal_scored:
+                self._check_out_of_bounds()
         
         # Calculate rewards
         rewards = self._calculate_rewards(actions, goal_scored)
@@ -144,7 +170,8 @@ class Environment:
             'score': self.score.copy(),
             'goal_scored': goal_scored,
             'ball_pos': self.ball_pos.copy(),
-            'step': self.current_step
+            'step': self.current_step,
+            'set_piece': self.set_piece_type
         }
         
         return observations, rewards, self.episode_done, info
@@ -200,12 +227,43 @@ class Environment:
         
         force = np.zeros(2)  # Default no force
         
+        # Special handling for goalkeepers
+        is_goalkeeper = hasattr(agent, 'role') and agent.role == 'goalkeeper'
+        
         if action == Actions.MOVE:
-            # Move towards ball with force
-            direction = self.ball_pos - agent.pos
-            if np.linalg.norm(direction) > 0:
-                direction = direction / np.linalg.norm(direction)
-                force = direction * self.max_force
+            if is_goalkeeper:
+                # Goalkeepers have special movement logic
+                # They stay near goal and position based on ball
+                if agent.team.name == 'BLUE':
+                    goal_line_x = -self.width / 2
+                else:
+                    goal_line_x = self.width / 2
+                
+                # Calculate distance from goal
+                goal_pos = np.array([goal_line_x, 0.0])
+                distance_from_goal = np.linalg.norm(agent.pos - goal_pos)
+                
+                # If too far from goal, return to goal
+                if distance_from_goal > 8.0:
+                    direction = goal_pos - agent.pos
+                    if np.linalg.norm(direction) > 0:
+                        direction = direction / np.linalg.norm(direction)
+                        force = direction * self.max_force * 0.5
+                # If ball is close to goal, position to intercept
+                elif np.linalg.norm(self.ball_pos - goal_pos) < 20.0:
+                    # Position on goal line based on ball Y position
+                    target_y = np.clip(self.ball_pos[1], -self.height * 0.2, self.height * 0.2)
+                    target_pos = np.array([goal_line_x + (3.0 if goal_line_x < 0 else -3.0), target_y])
+                    direction = target_pos - agent.pos
+                    if np.linalg.norm(direction) > 0.5:
+                        direction = direction / np.linalg.norm(direction)
+                        force = direction * self.max_force * 0.6
+            else:
+                # Normal field players move towards ball
+                direction = self.ball_pos - agent.pos
+                if np.linalg.norm(direction) > 0:
+                    direction = direction / np.linalg.norm(direction)
+                    force = direction * self.max_force
                 
         elif action == Actions.BLOCK:
             # Defensive positioning force towards own goal (consolidated handling)
@@ -246,8 +304,26 @@ class Environment:
                         break
         
         elif action == Actions.STAY:
-            # Apply strong damping to slow down
-            force = -agent.vel * self.K2 * 2.0  # Extra damping for staying
+            if is_goalkeeper:
+                # Goalkeepers stay positioned on goal line
+                if agent.team.name == 'BLUE':
+                    goal_line_x = -self.width / 2
+                else:
+                    goal_line_x = self.width / 2
+                
+                # Small adjustment to optimal position based on ball
+                target_y = np.clip(self.ball_pos[1] * 0.3, -self.height * 0.15, self.height * 0.15)
+                target_pos = np.array([goal_line_x + (3.0 if goal_line_x < 0 else -3.0), target_y])
+                direction = target_pos - agent.pos
+                
+                if np.linalg.norm(direction) > 0.5:
+                    direction = direction / np.linalg.norm(direction)
+                    force = direction * self.max_force * 0.3  # Very gentle adjustment
+                else:
+                    force = -agent.vel * self.K2 * 2.0  # Stop moving
+            else:
+                # Regular players apply strong damping to slow down
+                force = -agent.vel * self.K2 * 2.0  # Extra damping for staying
         
         # A1 = FORCE * K1 - V0 * K2
         acceleration = force * self.K1 - agent.vel * self.K2
@@ -269,7 +345,9 @@ class Environment:
         distance = np.linalg.norm(direction)
         
         if distance > 0:
-            self.ball_vel = (direction / distance) * min(10.0, distance * 0.5)
+            # Smooth pass speed: scales with distance for realistic physics
+            pass_speed = min(7.0, 3.0 + distance * 0.15)
+            self.ball_vel = (direction / distance) * pass_speed
             passer.has_ball = False
             self.ball_owner = None
     
@@ -280,12 +358,13 @@ class Environment:
         distance = np.linalg.norm(direction)
         
         if distance > 0:
-            # Add some randomness to shots
-            noise = np.random.normal(0, 0.2, 2)
+            # Add some randomness to shots (less randomness for more control)
+            noise = np.random.normal(0, 0.1, 2)
             direction = (direction / distance) + noise
+            direction = direction / np.linalg.norm(direction)  # Re-normalize
             
-            # If kicked, A1 = KICKFORCE * K1; V1 = 0
-            kick_force = min(self.max_ball_speed, 8.0 + distance * 0.1)
+            # Shot power scales with distance: closer = harder shot
+            kick_force = min(self.max_ball_speed, 5.0 + distance * 0.08)
             kick_acceleration = kick_force * self.kick_force_multiplier
             
             # Ball starts from rest when kicked (V1 = 0 initially, then gets acceleration)
@@ -469,20 +548,69 @@ class Environment:
                 self.ball_pos = agent1.pos.copy()
     
     
+    def _check_out_of_bounds(self):
+        """Check if ball went out of bounds and trigger appropriate set piece"""
+        from agents import Team
+        
+        min_x, max_x = -self.width / 2, self.width / 2
+        min_y, max_y = -self.height / 2, self.height / 2
+        
+        out_of_bounds = False
+        
+        # Check if ball crossed goal line (not in goal)
+        if self.ball_pos[0] <= min_x + 0.5 or self.ball_pos[0] >= max_x - 0.5:
+            # Determine if it's a corner kick or goal kick
+            if self.ball_pos[0] <= min_x + 0.5:
+                # Ball crossed left goal line (outside goal area)
+                if abs(self.ball_pos[1]) > self.goal_width / 2:
+                    # Outside goal - corner kick or goal kick
+                    last_touch = self._determine_last_touch()
+                    if last_touch and last_touch.name == 'BLUE':
+                        # Blue touched last, White gets corner
+                        self._trigger_corner_kick(Team.WHITE, is_left_side=True, corner_top=(self.ball_pos[1] > 0))
+                        out_of_bounds = True
+                    else:
+                        # White touched last, Blue gets goal kick
+                        self._trigger_goal_kick(Team.BLUE, is_left_side=True)
+                        out_of_bounds = True
+            elif self.ball_pos[0] >= max_x - 0.5:
+                # Ball crossed right goal line (outside goal area)
+                if abs(self.ball_pos[1]) > self.goal_width / 2:
+                    last_touch = self._determine_last_touch()
+                    if last_touch and last_touch.name == 'WHITE':
+                        # White touched last, Blue gets corner
+                        self._trigger_corner_kick(Team.BLUE, is_left_side=False, corner_top=(self.ball_pos[1] > 0))
+                        out_of_bounds = True
+                    else:
+                        # Blue touched last, White gets goal kick
+                        self._trigger_goal_kick(Team.WHITE, is_left_side=False)
+                        out_of_bounds = True
+        
+        # Check if ball crossed sideline (throw-in)
+        if not out_of_bounds and (self.ball_pos[1] <= min_y + 0.5 or self.ball_pos[1] >= max_y - 0.5):
+            last_touch = self._determine_last_touch()
+            throw_in_x = np.clip(self.ball_pos[0], min_x, max_x)
+            throw_in_y = max_y if self.ball_pos[1] >= max_y else min_y
+            
+            if last_touch:
+                # Opposite team gets throw-in
+                throw_in_team = Team.WHITE if last_touch == Team.BLUE else Team.BLUE
+                self._trigger_throw_in(throw_in_team, np.array([throw_in_x, throw_in_y]))
+                out_of_bounds = True
+        
+        # Keep ball in bounds if no set piece triggered
+        if not out_of_bounds:
+            self._enforce_boundaries()
+    
     def _enforce_boundaries(self):
         """Keep ball and agents within field boundaries with collision response"""
         # Field boundaries: Center at (0,0), so field goes from -50 to +50 in X, -32.5 to +32.5 in Y
         min_x, max_x = -self.width / 2, self.width / 2
         min_y, max_y = -self.height / 2, self.height / 2
         
-        # Ball boundaries with bounce
-        if self.ball_pos[0] <= min_x or self.ball_pos[0] >= max_x:
-            self.ball_vel[0] *= -0.8  # Bounce with energy loss
-            self.ball_pos[0] = np.clip(self.ball_pos[0], min_x, max_x)
-        
-        if self.ball_pos[1] <= min_y or self.ball_pos[1] >= max_y:
-            self.ball_vel[1] *= -0.8  # Bounce with energy loss
-            self.ball_pos[1] = np.clip(self.ball_pos[1], min_y, max_y)
+        # Ball boundaries - don't bounce, just keep in bounds (set pieces handle out of bounds)
+        self.ball_pos[0] = np.clip(self.ball_pos[0], min_x + 0.1, max_x - 0.1)
+        self.ball_pos[1] = np.clip(self.ball_pos[1], min_y + 0.1, max_y - 0.1)
         
         # Agent boundaries with collision response
         for agent in self.agents:
@@ -509,11 +637,67 @@ class Environment:
     
     
     def _calculate_rewards(self, actions: List[Actions], goal_scored: bool) -> List[float]:
-        """Calculate rewards for each agent including collision penalties"""
+        """Calculate rewards for each agent including positional and tactical play"""
         rewards = []
         
         for agent, action in zip(self.agents, actions):
             reward = 0.0
+            
+            # Positional discipline rewards
+            in_zone = False
+            if hasattr(agent, 'is_in_zone') and hasattr(agent, 'distance_from_zone'):
+                in_zone = agent.is_in_zone()
+                distance_from_zone = agent.distance_from_zone()
+                
+                if in_zone:
+                    # Reward for being in zone
+                    reward += 1.0
+                else:
+                    # Penalty for being out of zone (stronger penalty for defenders/attackers)
+                    if agent.role in ['defender', 'attacker']:
+                        penalty = min(5.0, distance_from_zone * 0.3)
+                        reward -= penalty
+                    else:
+                        reward -= distance_from_zone * 0.1
+            
+            # Role-specific positioning rewards
+            if agent.role == 'defender':
+                # Defenders rewarded for staying back
+                if agent.team.name == 'BLUE':
+                    if agent.pos[0] < -10.0:  # Staying in defensive half
+                        reward += 0.5
+                else:
+                    if agent.pos[0] > 10.0:
+                        reward += 0.5
+                
+                # Reward defender for passing when at zone boundary with ball
+                if agent.has_ball and action == Actions.PASS:
+                    if hasattr(agent, 'zone_center'):
+                        if agent.team.name == 'BLUE':
+                            at_boundary = agent.pos[0] > (agent.zone_center[0] + agent.zone_x_range * 0.7)
+                        else:
+                            at_boundary = agent.pos[0] < (agent.zone_center[0] - agent.zone_x_range * 0.7)
+                        
+                        if at_boundary:
+                            reward += 5.0  # Big reward for passing forward from zone boundary
+            
+            elif agent.role == 'attacker':
+                # Attackers rewarded for staying forward
+                if agent.team.name == 'BLUE':
+                    if agent.pos[0] > 10.0:  # Staying in attacking half
+                        reward += 0.5
+                else:
+                    if agent.pos[0] < -10.0:
+                        reward += 0.5
+                
+                # Reward attacker for being ready to receive (in zone, no ball)
+                if not agent.has_ball and in_zone:
+                    reward += 0.3
+                    
+                    # Extra reward if teammate has ball
+                    team_has_ball = any(a.has_ball for a in self.agents if a.team == agent.team)
+                    if team_has_ball:
+                        reward += 0.5
             
             # Goal rewards
             if goal_scored:
@@ -528,9 +712,20 @@ class Environment:
             if agent.has_ball:
                 reward += 5.0
             
-            # Distance to ball (encourage getting closer)
+            # Distance to ball - only reward if it's their job to get it
             distance_to_ball = np.linalg.norm(agent.pos - self.ball_pos)
-            reward += max(0, 5.0 - distance_to_ball * 0.1)
+            
+            # Only midfielders and players without specific zones get ball proximity rewards
+            # Defenders and attackers should focus on their zones
+            if agent.role in ['midfielder', 'player']:
+                reward += max(0, 3.0 - distance_to_ball * 0.1)
+            elif agent.role in ['defender', 'attacker']:
+                # Only reward if ball is in their zone
+                if in_zone and distance_to_ball < 15.0:
+                    reward += max(0, 2.0 - distance_to_ball * 0.1)
+                # Small reward even if ball is nearby but they're in position
+                elif in_zone:
+                    reward += 0.2
             
             # Action-specific rewards
             if action == Actions.PASS and agent.has_ball:
@@ -545,9 +740,20 @@ class Environment:
                 else:
                     reward -= 0.2
             
-            # Small penalty for staying idle
+            # STAY action penalties/rewards based on context
             if action == Actions.STAY:
-                reward -= 0.5
+                # Attackers staying in position when ball is with team = good
+                if agent.role == 'attacker' and in_zone:
+                    team_has_ball = any(a.has_ball and a != agent for a in self.agents if a.team == agent.team)
+                    if team_has_ball:
+                        reward += 0.3  # Reward for staying in position to receive
+                    else:
+                        reward -= 0.3
+                # Defenders staying in position = good
+                elif agent.role == 'defender' and in_zone:
+                    reward += 0.2
+                else:
+                    reward -= 0.5  # Penalty for idle when should be active
             
             # Collision penalties/rewards
             for collision in self.collisions_this_step:
@@ -601,4 +807,178 @@ class Environment:
     def _get_observations(self) -> List[dict]:
         """Get observations for all agents"""
         return [self.get_beliefs(agent) for agent in self.agents]
+    
+    def _determine_last_touch(self):
+        """Determine which team last touched the ball"""
+        if self.ball_owner:
+            return self.ball_owner.team
+        
+        # Find closest agent to ball as approximation
+        if not self.agents:
+            return None
+        
+        closest_agent = min(self.agents, key=lambda a: np.linalg.norm(a.pos - self.ball_pos))
+        if np.linalg.norm(closest_agent.pos - self.ball_pos) < 5.0:
+            return closest_agent.team
+        
+        return None
+    
+    def _trigger_corner_kick(self, team, is_left_side: bool, corner_top: bool):
+        """Trigger a corner kick set piece"""
+        from agents import Team
+        
+        self.set_piece_type = 'corner_kick'
+        self.set_piece_team = team
+        
+        # Position ball at corner
+        x = -self.width / 2 if is_left_side else self.width / 2
+        y = (self.height / 2 - 1.0) if corner_top else -(self.height / 2 - 1.0)
+        self.set_piece_position = np.array([x, y])
+        self.ball_pos = self.set_piece_position.copy()
+        self.ball_vel = np.zeros(2)
+        self.ball_owner = None
+        
+        self.set_piece_timer = self.set_piece_duration
+    
+    def _trigger_goal_kick(self, team, is_left_side: bool):
+        """Trigger a goal kick set piece"""
+        from agents import Team
+        
+        self.set_piece_type = 'goal_kick'
+        self.set_piece_team = team
+        
+        # Position ball in goal area
+        x = -self.width / 2 + 6.0 if is_left_side else self.width / 2 - 6.0
+        y = 0.0
+        self.set_piece_position = np.array([x, y])
+        self.ball_pos = self.set_piece_position.copy()
+        self.ball_vel = np.zeros(2)
+        self.ball_owner = None
+        
+        self.set_piece_timer = self.set_piece_duration
+    
+    def _trigger_throw_in(self, team, position: np.ndarray):
+        """Trigger a throw-in set piece (Rule 15)"""
+        from agents import Team
+        
+        self.set_piece_type = 'throw_in'
+        self.set_piece_team = team
+        self.set_piece_position = position.copy()
+        self.ball_pos = self.set_piece_position.copy()
+        self.ball_vel = np.zeros(2)
+        self.ball_owner = None
+        
+        self.set_piece_timer = self.set_piece_duration
+    
+    def _handle_set_piece(self, actions: List[Actions]):
+        """Handle set piece positioning and execution"""
+        from agents import Team
+        
+        self.set_piece_timer -= 1
+        
+        if self.set_piece_timer > 0:
+            # Positioning phase - move agents to appropriate positions
+            self._position_agents_for_set_piece()
+        else:
+            # Execute set piece
+            self._execute_set_piece(actions)
+            
+            # Resume normal play
+            self.set_piece_type = None
+            self.set_piece_team = None
+            self.set_piece_position = None
+    
+    def _position_agents_for_set_piece(self):
+        """Move agents to appropriate positions for set piece"""
+        if self.set_piece_type == 'corner_kick' and self.set_piece_position is not None:
+            # Position one attacking player near corner, others in penalty area
+            attacking_team = [a for a in self.agents if a.team == self.set_piece_team]
+            defending_team = [a for a in self.agents if a.team != self.set_piece_team]
+            
+            if attacking_team:
+                # Closest attacker takes corner (slower movement: 0.15 from 0.3)
+                corner_taker = min(attacking_team, key=lambda a: np.linalg.norm(a.pos - self.set_piece_position))
+                target_pos = self.set_piece_position + np.array([2.0, 0.0] if self.set_piece_position[0] < 0 else [-2.0, 0.0])
+                direction = target_pos - corner_taker.pos
+                if np.linalg.norm(direction) > 0.5:
+                    corner_taker.vel = direction * 0.15
+                    corner_taker.pos += corner_taker.vel
+                
+                # Other attackers move to penalty area (slower: 0.1 from 0.2)
+                if self.set_piece_team:
+                    goal_x = self.width / 2 if self.set_piece_team.name == 'BLUE' else -self.width / 2
+                    for i, attacker in enumerate(attacking_team[1:]):
+                        target = np.array([goal_x - (5.0 if goal_x > 0 else -5.0), (i - len(attacking_team)//2) * 5.0])
+                        direction = target - attacker.pos
+                        if np.linalg.norm(direction) > 1.0:
+                            attacker.vel = direction * 0.1
+                            attacker.pos += attacker.vel
+            
+            # Defenders mark attackers (slower: 0.1 from 0.2)
+            for defender in defending_team:
+                if attacking_team:
+                    nearest_attacker = min(attacking_team, key=lambda a: np.linalg.norm(a.pos - defender.pos))
+                    direction = nearest_attacker.pos - defender.pos
+                    if np.linalg.norm(direction) > 2.0:
+                        defender.vel = direction * 0.1
+                        defender.pos += defender.vel
+        
+        elif self.set_piece_type == 'throw_in' and self.set_piece_position is not None:
+            # Position throwing player at sideline (slower: 0.15 from 0.3)
+            throwing_team = [a for a in self.agents if a.team == self.set_piece_team]
+            
+            if throwing_team:
+                thrower = min(throwing_team, key=lambda a: np.linalg.norm(a.pos - self.set_piece_position))
+                direction = self.set_piece_position - thrower.pos
+                if np.linalg.norm(direction) > 0.5:
+                    thrower.vel = direction * 0.15
+                    thrower.pos += thrower.vel
+    
+    def _execute_set_piece(self, actions: List[Actions]):
+        """Execute the set piece"""
+        if self.set_piece_type == 'corner_kick' and self.set_piece_position is not None:
+            # Find corner taker (closest to corner)
+            attacking_team = [a for a in self.agents if a.team == self.set_piece_team]
+            if attacking_team and self.set_piece_team:
+                corner_taker = min(attacking_team, key=lambda a: np.linalg.norm(a.pos - self.set_piece_position))
+                
+                # Kick ball towards penalty area with nice arc
+                goal_x = self.width / 2 if self.set_piece_team.name == 'BLUE' else -self.width / 2
+                target = np.array([goal_x - (10.0 if goal_x > 0 else -10.0), random.uniform(-5.0, 5.0)])
+                direction = target - self.ball_pos
+                if np.linalg.norm(direction) > 0:
+                    direction = direction / np.linalg.norm(direction)
+                    self.ball_vel = direction * 8.0
+        
+        elif self.set_piece_type == 'throw_in' and self.set_piece_position is not None:
+            # Find thrower
+            throwing_team = [a for a in self.agents if a.team == self.set_piece_team]
+            if throwing_team:
+                thrower = min(throwing_team, key=lambda a: np.linalg.norm(a.pos - self.set_piece_position))
+                
+                # Throw ball to nearest teammate
+                teammates = [a for a in throwing_team if a != thrower]
+                if teammates:
+                    target_teammate = min(teammates, key=lambda a: np.linalg.norm(a.pos - thrower.pos))
+                    direction = target_teammate.pos - self.ball_pos
+                    distance = np.linalg.norm(direction)
+                    if distance > 0:
+                        direction = direction / distance
+                        # Throw speed scales with distance (closer = softer)
+                        throw_speed = min(6.0, 3.0 + distance * 0.1)
+                        self.ball_vel = direction * throw_speed
+        
+        elif self.set_piece_type == 'goal_kick' and self.set_piece_position is not None:
+            # Goalkeeper or defender kicks ball upfield
+            kicking_team = [a for a in self.agents if a.team == self.set_piece_team]
+            if kicking_team:
+                kicker = min(kicking_team, key=lambda a: np.linalg.norm(a.pos - self.set_piece_position))
+                
+                # Kick ball towards midfield with variation
+                target_x = random.uniform(-10.0, 10.0)
+                target_y = random.uniform(-self.height / 4, self.height / 4)
+                direction = np.array([target_x, target_y]) - self.ball_pos
+                if np.linalg.norm(direction) > 0:
+                    direction = direction / np.linalg.norm(direction)
+                    self.ball_vel = direction * 10.0
 
