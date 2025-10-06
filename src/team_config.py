@@ -6,7 +6,7 @@ Defines standard soccer team formations and positions for full team simulation.
 
 import numpy as np
 from typing import List, Tuple, Dict
-from agents import Attacker, Defender, Midfielder, Goalkeeper, Team, FieldDistribution
+from agents import Agent, Attacker, Defender, Midfielder, Goalkeeper, Team, FieldDistribution
 from env import Environment
 
 

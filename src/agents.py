@@ -24,6 +24,8 @@ class Agent(ABC):
         self.env.register(self)
         self.team = team
         self.pos = pos.copy() if pos is not None else np.zeros(2)
+        # Remember starting position so environment can restore it on reset
+        self.initial_pos = self.pos.copy()
         self.vel = np.zeros(2)
         self.has_ball = False
         self.role = role
@@ -284,7 +286,10 @@ class Agent(ABC):
             'my_team_score': my_score,
             'opponent_score': opponent_score,
             'time_remaining': time_remaining,
-            'ball_possession': ball_possession
+            'ball_possession': ball_possession,
+            'teammates_too_close': self.beliefs.teammates_too_close,
+            'teammates_nearby': self.beliefs.teammates_nearby,
+            'closest_teammate_distance': self.beliefs.closest_teammate_distance
         }
     
     

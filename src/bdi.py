@@ -29,6 +29,11 @@ class Beliefs:
         self.in_defensive_third: bool = False
         self.opponent_threatening: bool = False
         
+        # Teammate spacing beliefs
+        self.teammates_too_close: int = 0
+        self.teammates_nearby: List[float] = []  # Distances to nearby teammates
+        self.closest_teammate_distance: Optional[float] = None
+        
         # World model with confidence tracking
         # Ball tracking with confidence
         self.wm_ball: Optional[np.ndarray] = None  # μglobal position
@@ -77,6 +82,11 @@ class Beliefs:
         # Threat assessment
         if self.distance_to_opponent is not None:
             self.opponent_threatening = self.distance_to_opponent < 10.0
+        
+        # Teammate spacing assessment
+        self.teammates_too_close = belief_dict.get('teammates_too_close', 0)
+        self.teammates_nearby = belief_dict.get('teammates_nearby', [])
+        self.closest_teammate_distance = belief_dict.get('closest_teammate_distance', None)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert beliefs to dictionary for serialization or debugging"""
@@ -92,6 +102,9 @@ class Beliefs:
             'in_attacking_third': self.in_attacking_third,
             'in_defensive_third': self.in_defensive_third,
             'opponent_threatening': self.opponent_threatening,
+            'teammates_too_close': self.teammates_too_close,
+            'teammates_nearby': self.teammates_nearby,
+            'closest_teammate_distance': self.closest_teammate_distance,
             'wm_ball': self.wm_ball.tolist() if self.wm_ball is not None else None,
             'wm_ball_confidence': self.wm_ball_confidence,
             'current_time': self.current_time
@@ -317,6 +330,7 @@ class Desires:
         self.support_teammate = 0.5
         self.preserve_energy = 0.3
         self.take_risks = 0.5
+        self.disperse_from_teammates = 0.6  # Desire to maintain spacing
         
         # Base role desires (used as baseline)
         self.base_desires = self._get_base_desires_for_role(role)
@@ -342,7 +356,8 @@ class Desires:
                 'steal_ball': 0.4,
                 'block_opponent': 0.3,
                 'maintain_position': 0.4,
-                'support_teammate': 0.6
+                'support_teammate': 0.6,
+                'disperse_from_teammates': 0.5
             }
         elif role == 'defender':
             return {
@@ -355,7 +370,8 @@ class Desires:
                 'move_towards_ball': 0.5,
                 'create_opportunities': 0.3,
                 'maintain_position': 0.8,
-                'support_teammate': 0.7
+                'support_teammate': 0.7,
+                'disperse_from_teammates': 0.8
             }
         elif role == 'goalkeeper':
             return {
@@ -368,7 +384,8 @@ class Desires:
                 'move_towards_ball': 0.3,
                 'create_opportunities': 0.1,
                 'maintain_position': 0.9,
-                'support_teammate': 0.5
+                'support_teammate': 0.5,
+                'disperse_from_teammates': 0.3
             }
         else:  # midfielder
             return {
@@ -381,7 +398,8 @@ class Desires:
                 'move_towards_ball': 0.7,
                 'steal_ball': 0.6,
                 'block_opponent': 0.5,
-                'maintain_position': 0.6
+                'maintain_position': 0.6,
+                'disperse_from_teammates': 0.7
             }
     
     def _apply_base_desires(self):
@@ -436,6 +454,9 @@ class Desires:
         
         # Apply tactical modifications based on team state
         self._apply_tactical_modifications(beliefs, ball_possession)
+        
+        # Apply spacing modifications to prevent clustering
+        self._apply_spacing_modifications(beliefs, game_info)
         
         # Ensure desires stay within reasonable bounds [0, 1.5]
         self._clamp_desires()
@@ -539,12 +560,59 @@ class Desires:
             self.take_risks *= (1.0 - self.fatigue_factor * 0.5)
             self.move_towards_ball *= (1.0 - self.fatigue_factor * 0.3)
     
+    def _apply_spacing_modifications(self, beliefs: Beliefs, game_info: dict):
+        """Apply modifications to encourage proper teammate spacing and prevent clustering."""
+        
+        # Extract teammate proximity information if available
+        teammates_nearby = game_info.get('teammates_nearby', [])
+        teammates_too_close = game_info.get('teammates_too_close', 0)
+        
+        # Base dispersion desire already set from role
+        base_disperse = self.disperse_from_teammates
+        
+        # Increase dispersion desire when teammates are too close
+        if teammates_too_close > 0:
+            # Strong desire to disperse when clustering occurs
+            clustering_factor = min(2.0, 1.0 + teammates_too_close * 0.4)
+            self.disperse_from_teammates *= clustering_factor
+            
+            # Also reduce some competing desires when clustering
+            self.move_towards_ball *= 0.8  # Less focus on ball when need to spread
+            self.support_teammate *= 0.9   # Less direct support, more spacing
+        
+        # If we're well spaced, maintain current positioning unless urgent
+        elif len(teammates_nearby) > 0:
+            # Good spacing - maintain but don't obsess over it
+            self.disperse_from_teammates *= 1.0
+            self.maintain_position *= 1.1  # Slight preference to maintain good position
+        
+        # Special cases based on game situation
+        ball_possession = game_info.get('ball_possession', None)
+        
+        # When opponent has ball, allow closer spacing for defensive pressing
+        if ball_possession == 'opponent':
+            self.disperse_from_teammates *= 0.8  # Allow closer positioning for defense
+            
+        # When we have ball, ensure good spacing for passing options
+        elif ball_possession == 'my_team':
+            if not beliefs.has_ball_possession:  # I don't have ball, but team does
+                self.disperse_from_teammates *= 1.3  # Create passing options
+                self.support_teammate *= 1.2
+        
+        # In defensive third, allow closer spacing
+        if beliefs.in_defensive_third:
+            self.disperse_from_teammates *= 0.9
+            
+        # In attacking third, need good spacing for opportunities
+        elif beliefs.in_attacking_third:
+            self.disperse_from_teammates *= 1.2
+    
     def _clamp_desires(self):
         """Ensure all desires stay within reasonable bounds."""
         desire_attributes = [
             'score_goal', 'keep_possession', 'create_opportunities', 'move_towards_ball',
             'defend_goal', 'steal_ball', 'block_opponent', 'maintain_position',
-            'support_teammate', 'preserve_energy', 'take_risks'
+            'support_teammate', 'preserve_energy', 'take_risks', 'disperse_from_teammates'
         ]
         
         for attr in desire_attributes:
@@ -565,6 +633,7 @@ class Desires:
             'support_teammate': self.support_teammate,
             'preserve_energy': self.preserve_energy,
             'take_risks': self.take_risks,
+            'disperse_from_teammates': self.disperse_from_teammates,
             'desperation_factor': self.desperation_factor,
             'confidence_factor': self.confidence_factor,
             'fatigue_factor': self.fatigue_factor
@@ -598,6 +667,8 @@ class Desires:
             bias += self.move_towards_ball
             if beliefs.distance_to_ball and beliefs.distance_to_ball > 5.0:
                 bias += 0.2
+            # Add bias for dispersing from teammates
+            bias += self.disperse_from_teammates * 0.5
                 
         elif action == Actions.TACKLE:
             bias += self.steal_ball

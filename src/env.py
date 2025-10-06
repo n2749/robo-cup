@@ -63,6 +63,9 @@ class Environment:
         self.set_piece_position = None  # Where the set piece happens
         self.set_piece_timer = 0  # Countdown before resuming play
         self.set_piece_duration = 100  # Steps to position before resuming (5 seconds at 20Hz, increased from 40)
+
+        # Track last touch for better set-piece decisions
+        self.last_touch_team = None
         
         # Movement: P1 = P0 + V0; V1 = V0 + A0; A1 = FORCE * K1 - V0 * K2
         self.K1 = 0.05  # Force scaling factor (slightly increased for better control)
@@ -90,12 +93,16 @@ class Environment:
         
         # Reset agents to starting positions (field center at 0,0)
         for i, agent in enumerate(self.agents):
-            if agent.team.name == 'BLUE':
-                # Blue team starts on left side (negative X)
-                agent.pos = np.array([-self.width * 0.25, (i % 2 - 0.5) * self.height * 0.3])
+            # If agent has an initial_pos, use it; otherwise fall back to default layout
+            if hasattr(agent, 'initial_pos') and agent.initial_pos is not None:
+                agent.pos = agent.initial_pos.copy()
             else:
-                # White team starts on right side (positive X)  
-                agent.pos = np.array([self.width * 0.25, (i % 2 - 0.5) * self.height * 0.3])
+                if agent.team.name == 'BLUE':
+                    # Blue team starts on left side (negative X)
+                    agent.pos = np.array([-self.width * 0.25, (i % 2 - 0.5) * self.height * 0.3])
+                else:
+                    # White team starts on right side (positive X)  
+                    agent.pos = np.array([self.width * 0.25, (i % 2 - 0.5) * self.height * 0.3])
             
             agent.vel = np.zeros(2)
             agent.has_ball = False
@@ -109,6 +116,9 @@ class Environment:
         self.set_piece_team = None
         self.set_piece_position = None
         self.set_piece_timer = 0
+
+        # Reset last touch
+        self.last_touch_team = None
         
         return self._get_observations()
     
@@ -212,13 +222,31 @@ class Environment:
             for opp in opponents
         )
         
+        # Calculate teammate spacing information
+        teammates_nearby = []
+        teammates_too_close = 0
+        closest_teammate_distance = None
+        
+        if teammates:
+            teammate_distances = [np.linalg.norm(agent.pos - tm.pos) for tm in teammates]
+            closest_teammate_distance = min(teammate_distances)
+            
+            # Count teammates that are too close (within 5 meters)
+            teammates_too_close = sum(1 for dist in teammate_distances if dist < 5.0)
+            
+            # List of distances to teammates within reasonable range (5-15 meters)
+            teammates_nearby = [dist for dist in teammate_distances if 5.0 <= dist <= 15.0]
+        
         return {
             'distance_to_ball': distance_to_ball,
             'distance_to_goal': distance_to_goal,
             'distance_to_home_goal': distance_to_home_goal,
             'distance_to_opponent': distance_to_opponent,
             'teammate_open': teammate_open,
-            'goal_open': goal_open
+            'goal_open': goal_open,
+            'teammates_too_close': teammates_too_close,
+            'teammates_nearby': teammates_nearby,
+            'closest_teammate_distance': closest_teammate_distance
         }
     
 
@@ -259,11 +287,32 @@ class Environment:
                         direction = direction / np.linalg.norm(direction)
                         force = direction * self.max_force * 0.6
             else:
-                # Normal field players move towards ball
-                direction = self.ball_pos - agent.pos
-                if np.linalg.norm(direction) > 0:
-                    direction = direction / np.linalg.norm(direction)
-                    force = direction * self.max_force
+                # Normal field players movement with dispersion consideration
+                ball_direction = self.ball_pos - agent.pos
+                ball_distance = np.linalg.norm(ball_direction)
+                
+                # Calculate dispersion force from teammates
+                dispersion_force = self._calculate_dispersion_force(agent)
+                
+                # Base force towards ball (if applicable)
+                if ball_distance > 0:
+                    ball_direction = ball_direction / ball_distance
+                    ball_force = ball_direction * self.max_force
+                else:
+                    ball_force = np.zeros(2)
+                
+                # Combine ball attraction with dispersion
+                # Strong dispersion desire overrides ball attraction when clustering
+                if hasattr(agent, 'desires') and agent.desires.disperse_from_teammates > 1.0:
+                    # Prioritize dispersion when strong clustering desire
+                    force = dispersion_force * 0.7 + ball_force * 0.3
+                else:
+                    # Normal movement with some dispersion
+                    force = ball_force * 0.8 + dispersion_force * 0.2
+                
+                # Ensure force doesn't exceed maximum
+                if np.linalg.norm(force) > self.max_force:
+                    force = (force / np.linalg.norm(force)) * self.max_force
                 
         elif action == Actions.BLOCK:
             # Defensive positioning force towards own goal (consolidated handling)
@@ -301,6 +350,8 @@ class Environment:
                         opp.has_ball = False
                         agent.has_ball = True
                         self.ball_owner = agent
+                        # Update last touch on successful tackle
+                        self.last_touch_team = agent.team
                         break
         
         elif action == Actions.STAY:
@@ -350,6 +401,8 @@ class Environment:
             self.ball_vel = (direction / distance) * pass_speed
             passer.has_ball = False
             self.ball_owner = None
+            # Track last touch team
+            self.last_touch_team = passer.team
     
     
     def _shoot_ball(self, shooter, target_pos):
@@ -371,6 +424,8 @@ class Environment:
             self.ball_vel = direction * kick_acceleration
             shooter.has_ball = False
             self.ball_owner = None
+            # Track last touch team
+            self.last_touch_team = shooter.team
     
     
     def _update_ball_physics(self):
@@ -397,18 +452,26 @@ class Environment:
                     agent.has_ball = True
                     self.ball_owner = agent
                     self.ball_vel = np.zeros(2)  # Ball stops when possessed
+                    # Update last touch team on possession
+                    self.last_touch_team = agent.team
                     break
     
     def _check_goals(self) -> bool:
         """Check if a goal was scored"""
+        # In soccer, a goal is scored when the ENTIRE ball crosses the goal line
+        # We approximate the ball as having a small radius (0.11m = regulation soccer ball radius)
+        ball_radius = 0.11  # Standard soccer ball radius in meters
+        
         # Left goal at (-50, 0) - Blue team defends this
-        if (self.ball_pos[0] <= -self.width / 2 and 
+        # Ball must completely cross the goal line (ball center + radius beyond goal line)
+        if (self.ball_pos[0] <= (-self.width / 2 - ball_radius) and 
             abs(self.ball_pos[1] - self.goal_left[1]) <= self.goal_width / 2):
             self.score['white'] += 1  # White team scores
             return True
         
         # Right goal at (50, 0) - White team defends this  
-        if (self.ball_pos[0] >= self.width / 2 and 
+        # Ball must completely cross the goal line (ball center + radius beyond goal line)
+        if (self.ball_pos[0] >= (self.width / 2 + ball_radius) and 
             abs(self.ball_pos[1] - self.goal_right[1]) <= self.goal_width / 2):
             self.score['blue'] += 1  # Blue team scores
             return True
@@ -455,6 +518,51 @@ class Environment:
                 
                 # Add to agent velocity
                 agent1.vel += repulsion_force * 0.3  # Scale down the effect
+    
+    
+    def _calculate_dispersion_force(self, agent) -> np.ndarray:
+        """
+        Calculate dispersion force to encourage agent to spread out from teammates.
+        This is used specifically for MOVE actions when dispersion is desired.
+        
+        Args:
+            agent: The agent to calculate dispersion force for
+            
+        Returns:
+            Force vector pointing away from clustered teammates
+        """
+        teammates = [a for a in self.agents if a.team == agent.team and a != agent]
+        if not teammates:
+            return np.zeros(2)
+        
+        dispersion_force = np.zeros(2)
+        influence_distance = 8.0  # Distance within which teammates influence dispersion
+        
+        for teammate in teammates:
+            distance_vec = agent.pos - teammate.pos
+            distance = np.linalg.norm(distance_vec)
+            
+            if 0 < distance < influence_distance:
+                # Normalize direction (away from teammate)
+                if distance > 0:
+                    direction = distance_vec / distance
+                    
+                    # Stronger dispersion force when closer
+                    dispersion_strength = (1.0 - distance / influence_distance) ** 2
+                    dispersion_force += direction * dispersion_strength * self.max_force * 0.5
+        
+        # Also consider zone return if agent has a designated zone
+        if hasattr(agent, 'is_in_zone') and hasattr(agent, 'get_zone_return_direction'):
+            if not agent.is_in_zone():
+                # Add force to return to zone when dispersing
+                zone_direction = agent.get_zone_return_direction()
+                dispersion_force += zone_direction * self.max_force * 0.3
+        
+        # Limit the dispersion force
+        if np.linalg.norm(dispersion_force) > self.max_force:
+            dispersion_force = (dispersion_force / np.linalg.norm(dispersion_force)) * self.max_force
+        
+        return dispersion_force
     
     
     def _handle_collisions(self):
@@ -529,11 +637,15 @@ class Environment:
                 self.ball_owner = None
                 # Ball flies in direction of collision
                 self.ball_vel = collision_normal * np.random.uniform(2.0, 5.0)
+                # Last touch remains agent1's team
+                self.last_touch_team = agent1.team
             elif np.random.random() < 0.2:  # 20% chance ball transfers to other agent
                 agent1.has_ball = False
                 agent2.has_ball = True
                 self.ball_owner = agent2
                 self.ball_pos = agent2.pos.copy()
+                # Update last touch to new owner
+                self.last_touch_team = agent2.team
                 
         elif agent2.has_ball:
             # Same logic for agent2
@@ -541,11 +653,15 @@ class Environment:
                 agent2.has_ball = False
                 self.ball_owner = None
                 self.ball_vel = -collision_normal * np.random.uniform(2.0, 5.0)
+                # Last touch remains agent2's team
+                self.last_touch_team = agent2.team
             elif np.random.random() < 0.2:
                 agent2.has_ball = False
                 agent1.has_ball = True
                 self.ball_owner = agent1
                 self.ball_pos = agent1.pos.copy()
+                # Update last touch to new owner
+                self.last_touch_team = agent1.team
     
     
     def _check_out_of_bounds(self):
@@ -554,35 +670,37 @@ class Environment:
         
         min_x, max_x = -self.width / 2, self.width / 2
         min_y, max_y = -self.height / 2, self.height / 2
+        ball_radius = 0.11  # Same radius as in goal detection
         
         out_of_bounds = False
         
         # Check if ball crossed goal line (not in goal)
-        if self.ball_pos[0] <= min_x + 0.5 or self.ball_pos[0] >= max_x - 0.5:
+        # Ball is out when its center + radius crosses the line
+        if self.ball_pos[0] <= (min_x - ball_radius) or self.ball_pos[0] >= (max_x + ball_radius):
             # Determine if it's a corner kick or goal kick
             if self.ball_pos[0] <= min_x + 0.5:
                 # Ball crossed left goal line (outside goal area)
                 if abs(self.ball_pos[1]) > self.goal_width / 2:
                     # Outside goal - corner kick or goal kick
                     last_touch = self._determine_last_touch()
-                    if last_touch and last_touch.name == 'BLUE':
-                        # Blue touched last, White gets corner
+                    if (last_touch is None) or (last_touch.name == 'BLUE'):
+                        # Unknown last touch or Blue touched last: White gets corner
                         self._trigger_corner_kick(Team.WHITE, is_left_side=True, corner_top=(self.ball_pos[1] > 0))
                         out_of_bounds = True
                     else:
-                        # White touched last, Blue gets goal kick
+                        # White touched last: Blue gets goal kick
                         self._trigger_goal_kick(Team.BLUE, is_left_side=True)
                         out_of_bounds = True
             elif self.ball_pos[0] >= max_x - 0.5:
                 # Ball crossed right goal line (outside goal area)
                 if abs(self.ball_pos[1]) > self.goal_width / 2:
                     last_touch = self._determine_last_touch()
-                    if last_touch and last_touch.name == 'WHITE':
-                        # White touched last, Blue gets corner
+                    if (last_touch is None) or (last_touch.name == 'WHITE'):
+                        # Unknown last touch or White touched last: Blue gets corner
                         self._trigger_corner_kick(Team.BLUE, is_left_side=False, corner_top=(self.ball_pos[1] > 0))
                         out_of_bounds = True
                     else:
-                        # Blue touched last, White gets goal kick
+                        # Blue touched last: White gets goal kick
                         self._trigger_goal_kick(Team.WHITE, is_left_side=False)
                         out_of_bounds = True
         
@@ -816,10 +934,14 @@ class Environment:
     
     def _determine_last_touch(self):
         """Determine which team last touched the ball"""
+        # Use tracked last touch if available
+        if self.last_touch_team is not None:
+            return self.last_touch_team
+
         if self.ball_owner:
             return self.ball_owner.team
         
-        # Find closest agent to ball as approximation
+        # Fallback: closest agent to ball as approximation
         if not self.agents:
             return None
         
@@ -943,18 +1065,42 @@ class Environment:
     def _execute_set_piece(self, actions: List[Actions]):
         """Execute the set piece"""
         if self.set_piece_type == 'corner_kick' and self.set_piece_position is not None:
-            # Find corner taker (closest to corner)
+            # Corner kick behaves similar to a throw-in: closest attacker takes it and passes to a teammate
             attacking_team = [a for a in self.agents if a.team == self.set_piece_team]
             if attacking_team and self.set_piece_team:
+                # Corner taker: closest attacker to the corner spot
                 corner_taker = min(attacking_team, key=lambda a: np.linalg.norm(a.pos - self.set_piece_position))
-                
-                # Kick ball towards penalty area with nice arc
-                goal_x = self.width / 2 if self.set_piece_team.name == 'BLUE' else -self.width / 2
-                target = np.array([goal_x - (10.0 if goal_x > 0 else -10.0), random.uniform(-5.0, 5.0)])
-                direction = target - self.ball_pos
-                if np.linalg.norm(direction) > 0:
-                    direction = direction / np.linalg.norm(direction)
-                    self.ball_vel = direction * 8.0
+
+                # Select target teammate (exclude corner taker)
+                teammates = [a for a in attacking_team if a is not corner_taker]
+                if teammates:
+                    # Prefer targets in/near the penalty area; otherwise nearest teammate
+                    goal_x = self.width / 2 if self.set_piece_team.name == 'BLUE' else -self.width / 2
+                    in_box = [a for a in teammates if (abs(goal_x - a.pos[0]) <= 20.0 and abs(a.pos[1]) <= (self.penalty_area_height / 2))]
+                    if in_box:
+                        target_teammate = min(in_box, key=lambda a: np.linalg.norm(a.pos - corner_taker.pos))
+                    else:
+                        target_teammate = min(teammates, key=lambda a: np.linalg.norm(a.pos - corner_taker.pos))
+
+                    # Pass the ball from corner spot to the target teammate (throw-in like speed)
+                    direction = target_teammate.pos - self.ball_pos
+                    distance = np.linalg.norm(direction)
+                    if distance > 0:
+                        direction = direction / distance
+                        pass_speed = min(7.0, 3.0 + 0.1 * distance)
+                        self.ball_vel = direction * pass_speed
+                        # Last touch is the corner taker's team
+                        self.last_touch_team = corner_taker.team
+                else:
+                    # No available teammate: gently play the ball into the nearest penalty area
+                    goal_x = self.width / 2 if self.set_piece_team.name == 'BLUE' else -self.width / 2
+                    target = np.array([goal_x - (10.0 if goal_x > 0 else -10.0), random.uniform(-5.0, 5.0)])
+                    direction = target - self.ball_pos
+                    distance = np.linalg.norm(direction)
+                    if distance > 0:
+                        direction = direction / distance
+                        self.ball_vel = direction * 6.0
+                        self.last_touch_team = corner_taker.team
         
         elif self.set_piece_type == 'throw_in' and self.set_piece_position is not None:
             # Find thrower

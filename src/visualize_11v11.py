@@ -13,7 +13,7 @@ import numpy as np
 from typing import List, Dict, Tuple
 
 
-def list_11v11_checkpoints(checkpoint_dir: str = "checkpoints_11v11") -> List[str]:
+def list_11v11_checkpoints(checkpoint_dir: str = "checkpoints/11v11") -> List[str]:
     """List available 11v11 checkpoint files."""
     if not os.path.exists(checkpoint_dir):
         return []
@@ -182,7 +182,7 @@ def main():
     parser = argparse.ArgumentParser(description='11v11 Soccer Visualization')
     parser.add_argument('--checkpoint', '-c', type=str, 
                        help='Path to specific checkpoint file')
-    parser.add_argument('--checkpoint-dir', '-d', type=str, default='checkpoints_11v11',
+    parser.add_argument('--checkpoint-dir', '-d', type=str, default='checkpoints/11v11',
                        help='Directory containing 11v11 checkpoints')
     parser.add_argument('--list', '-l', action='store_true',
                        help='List available checkpoints with analysis')
