@@ -1,5 +1,5 @@
 
-from agents import Defender, Attacker, Team, FieldDistribution
+from agents import Defender, Attacker, Goalkeeper, Team, FieldDistribution
 from env import Environment
 from bdi import Actions
 import numpy as np
@@ -408,20 +408,45 @@ def main():
     env = Environment()
     
     # Create agents for training (field center at 0,0)
-    # Blue team (attacking left to right, starts on left side)
-    attacker_blue = Attacker(env, Team.BLUE, pos=np.array([-env.width * 0.25, -env.height * 0.1]))
-    defender_blue = Defender(env, Team.BLUE, pos=np.array([-env.width * 0.4, env.height * 0.1]))
+    # OPTION 1: 2v2 (1 GK + 1 Field Player per team) - FASTEST TRAINING
+    # Blue team (attacking left to right, defends left goal)
+    goalkeeper_blue = Goalkeeper(env, Team.BLUE, pos=np.array([-env.width * 0.48, 0.0]))
+    attacker_blue = Attacker(env, Team.BLUE, pos=np.array([-env.width * 0.2, 0.0]))
     
-    # White team (attacking right to left, starts on right side)  
-    attacker_white = Attacker(env, Team.WHITE, pos=np.array([env.width * 0.25, env.height * 0.1]))
-    defender_white = Defender(env, Team.WHITE, pos=np.array([env.width * 0.4, -env.height * 0.1]))
+    # White team (attacking right to left, defends right goal)
+    goalkeeper_white = Goalkeeper(env, Team.WHITE, pos=np.array([env.width * 0.48, 0.0]))
+    attacker_white = Attacker(env, Team.WHITE, pos=np.array([env.width * 0.2, 0.0]))
     
     # Create field distribution with all agents
     config = FieldDistribution()
+    config.add(goalkeeper_blue)
     config.add(attacker_blue)
-    config.add(defender_blue)
+    config.add(goalkeeper_white)
     config.add(attacker_white)
-    config.add(defender_white)
+    
+    # OPTION 2: 3v3 (1 GK + 1 DF + 1 FW per team) - BALANCED
+    # Uncomment below and comment above for 3v3:
+    # goalkeeper_blue = Goalkeeper(env, Team.BLUE, pos=np.array([-env.width * 0.48, 0.0]))
+    # defender_blue = Defender(env, Team.BLUE, pos=np.array([-env.width * 0.35, env.height * 0.1]))
+    # attacker_blue = Attacker(env, Team.BLUE, pos=np.array([-env.width * 0.2, -env.height * 0.1]))
+    # goalkeeper_white = Goalkeeper(env, Team.WHITE, pos=np.array([env.width * 0.48, 0.0]))
+    # defender_white = Defender(env, Team.WHITE, pos=np.array([env.width * 0.35, -env.height * 0.1]))
+    # attacker_white = Attacker(env, Team.WHITE, pos=np.array([env.width * 0.2, env.height * 0.1]))
+    # config = FieldDistribution()
+    # config.add(goalkeeper_blue)
+    # config.add(defender_blue)
+    # config.add(attacker_blue)
+    # config.add(goalkeeper_white)
+    # config.add(defender_white)
+    # config.add(attacker_white)
+    
+    # OPTION 3: 1v1 (Just goalkeepers) - FOR TESTING
+    # Uncomment below and comment above for 1v1:
+    # goalkeeper_blue = Goalkeeper(env, Team.BLUE, pos=np.array([-env.width * 0.48, 0.0]))
+    # goalkeeper_white = Goalkeeper(env, Team.WHITE, pos=np.array([env.width * 0.48, 0.0]))
+    # config = FieldDistribution()
+    # config.add(goalkeeper_blue)
+    # config.add(goalkeeper_white)
     
     # Configure training parameters
     training_config = TrainingConfig(

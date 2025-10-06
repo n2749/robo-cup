@@ -1,7 +1,7 @@
 from enum import Enum
-from abc import ABC, abstractmethod
+from abc import ABC
 import numpy as np
-from typing import Optional, List
+from typing import List
 
 from bdi import Beliefs, Desires, Intentions, Actions, BDIReasoningEngine
 from qlearning import QLearningPolicy
@@ -28,6 +28,9 @@ class Agent(ABC):
         self.has_ball = False
         self.role = role
         
+        # Positional zones for tactical play
+        self._setup_zones()
+        
         # BDI components
         self.beliefs = Beliefs()
         self.desires = Desires(role=role)  # Dynamic desires based on role
@@ -52,6 +55,69 @@ class Agent(ABC):
         # Performance tracking
         self.episode_rewards = []
         self.actions_taken = []
+    
+    def _setup_zones(self):
+        """Setup responsibility zones based on role and team"""
+        field_width = self.env.width if self.env else 100.0
+        field_height = self.env.height if self.env else 65.0
+        
+        # Team direction (attacking direction)
+        if self.team.name == 'BLUE':
+            # Blue attacks right (positive X)
+            defensive_x = -field_width * 0.35
+            midfield_x = 0.0
+            attacking_x = field_width * 0.35
+        else:
+            # White attacks left (negative X)
+            defensive_x = field_width * 0.35
+            midfield_x = 0.0
+            attacking_x = -field_width * 0.35
+        
+        # Define zones based on role
+        if self.role == 'defender':
+            self.zone_center = np.array([defensive_x, 0.0])
+            self.zone_x_range = field_width * 0.25  # Can move 25% of field width
+            self.zone_y_range = field_height * 0.4  # Can cover 40% of field height
+        elif self.role == 'attacker':
+            self.zone_center = np.array([attacking_x, 0.0])
+            self.zone_x_range = field_width * 0.25
+            self.zone_y_range = field_height * 0.4
+        elif self.role == 'midfielder':
+            self.zone_center = np.array([midfield_x, 0.0])
+            self.zone_x_range = field_width * 0.3
+            self.zone_y_range = field_height * 0.5
+        else:  # goalkeeper
+            goal_x = -field_width / 2 if self.team.name == 'BLUE' else field_width / 2
+            self.zone_center = np.array([goal_x, 0.0])
+            self.zone_x_range = field_width * 0.05
+            self.zone_y_range = field_height * 0.3
+    
+    def is_in_zone(self) -> bool:
+        """Check if agent is in their responsibility zone"""
+        if not hasattr(self, 'zone_center'):
+            return True
+        
+        dx = abs(self.pos[0] - self.zone_center[0])
+        dy = abs(self.pos[1] - self.zone_center[1])
+        
+        return dx <= self.zone_x_range and dy <= self.zone_y_range
+    
+    def distance_from_zone(self) -> float:
+        """Calculate how far agent is from their zone center"""
+        if not hasattr(self, 'zone_center'):
+            return 0.0
+        
+        return float(np.linalg.norm(self.pos - self.zone_center))
+    
+    def get_zone_return_direction(self) -> np.ndarray:
+        """Get direction vector to return to zone"""
+        if not hasattr(self, 'zone_center'):
+            return np.zeros(2)
+        
+        direction = self.zone_center - self.pos
+        if np.linalg.norm(direction) > 0:
+            return direction / np.linalg.norm(direction)
+        return np.zeros(2)
         
     
     def perceive(self):
@@ -282,22 +348,44 @@ class Agent(ABC):
 
 class Defender(Agent):
     """
-    Defender agent with defensive-focused desires and behaviors.
-    Desires are now dynamically managed by the BDI system.
+    Defender agent with defensive-focused desires and positional discipline.
+    Stays in defensive zone and passes forward when ball reaches zone boundary.
     """
     
     def __init__(self, env, team: Team, pos=np.zeros(2)):
         super().__init__(env, team, role="defender", pos=pos)
-        # Desires are dynamically set based on role and game state
-    
     
     def deliberate(self) -> List[Actions]:
         """
-        Defender-specific deliberation with focus on defensive actions.
+        Defender-specific deliberation with zone awareness.
         """
         options = super().deliberate()
         
-        # Prioritize defensive actions
+        # Check if out of zone
+        out_of_zone = not self.is_in_zone()
+        distance_from_zone = self.distance_from_zone()
+        
+        # If far from zone and don't have ball, prioritize returning
+        if out_of_zone and not self.has_ball:
+            if distance_from_zone > 15.0:
+                # Must return to zone
+                return [Actions.MOVE, Actions.STAY]
+        
+        # If have ball and near attacking zone boundary, should pass
+        if self.has_ball:
+            # Check if close to zone boundary in attacking direction
+            if self.team.name == 'BLUE':
+                at_boundary = self.pos[0] > (self.zone_center[0] + self.zone_x_range * 0.7)
+            else:
+                at_boundary = self.pos[0] < (self.zone_center[0] - self.zone_x_range * 0.7)
+            
+            if at_boundary:
+                # At zone boundary with ball - should pass forward
+                teammates = [a for a in self.env.agents if a.team == self.team and a.role == 'attacker']
+                if teammates:
+                    return [Actions.PASS, Actions.MOVE]
+        
+        # Normal defensive deliberation
         if self.beliefs.in_defensive_third:
             defensive_actions = [Actions.BLOCK, Actions.TACKLE, Actions.MOVE]
             options = [action for action in options if action in defensive_actions] + \
@@ -308,22 +396,49 @@ class Defender(Agent):
 
 class Attacker(Agent):
     """
-    Attacker agent with offensive-focused desires and behaviors.
-    Desires are now dynamically managed by the BDI system.
+    Attacker agent with offensive focus and zone discipline.
+    Stays in attacking zone, ready to receive passes and score.
     """
     
     def __init__(self, env, team: Team, pos=np.zeros(2)):
         super().__init__(env, team, role="attacker", pos=pos)
-        # Desires are dynamically set based on role and game state
-    
     
     def deliberate(self) -> List[Actions]:
         """
-        Attacker-specific deliberation with focus on offensive actions.
+        Attacker-specific deliberation with zone awareness.
         """
         options = super().deliberate()
         
-        # Prioritize offensive actions
+        # Check zone position
+        out_of_zone = not self.is_in_zone()
+        distance_from_zone = self.distance_from_zone()
+        
+        # If far from attacking zone, return to position
+        if out_of_zone and not self.has_ball:
+            if distance_from_zone > 20.0:
+                # Too far from attacking zone - return
+                return [Actions.MOVE, Actions.STAY]
+            elif distance_from_zone > 10.0:
+                # Moderately far - prefer positioning
+                return [Actions.MOVE, Actions.STAY, Actions.PASS]
+        
+        # If in attacking zone, focus on scoring
+        if self.is_in_zone():
+            if self.has_ball:
+                # Have ball in attacking zone - shoot or pass
+                if self.beliefs.goal_open or (self.beliefs.distance_to_goal and self.beliefs.distance_to_goal < 15.0):
+                    return [Actions.SHOOT, Actions.PASS, Actions.MOVE]
+                else:
+                    return [Actions.PASS, Actions.MOVE, Actions.SHOOT]
+            else:
+                # In position without ball - stay ready to receive
+                if self.beliefs.distance_to_ball and self.beliefs.distance_to_ball < 15.0:
+                    return [Actions.MOVE, Actions.TACKLE, Actions.STAY]
+                else:
+                    # Ball far away - maintain position
+                    return [Actions.STAY, Actions.MOVE]
+        
+        # Normal offensive deliberation
         if self.beliefs.in_attacking_third or self.beliefs.has_ball_possession:
             offensive_actions = [Actions.SHOOT, Actions.PASS, Actions.MOVE]
             options = [action for action in options if action in offensive_actions] + \
@@ -346,102 +461,45 @@ class Midfielder(Agent):
 class Goalkeeper(Agent):
     """
     Goalkeeper agent with specialized defensive behaviors.
-    Desires are now dynamically managed by the BDI system.
+    Stays near goal and protects it. Does not chase the ball.
     """
     
     def __init__(self, env, team: Team, pos=np.zeros(2)):
         super().__init__(env, team, role="goalkeeper", pos=pos)
-        # Desires are dynamically set based on role and game state
+        
+        # Store goal position for goalkeeper
+        if team.name == 'BLUE':
+            self.goal_position = np.array([-env.width / 2, 0.0])
+            self.goal_line_x = -env.width / 2
+        else:
+            self.goal_position = np.array([env.width / 2, 0.0])
+            self.goal_line_x = env.width / 2
+        
+        self.max_distance_from_goal = 8.0  # Stay within 8m of goal
     
     
     def deliberate(self) -> List[Actions]:
         """
         Goalkeeper-specific deliberation focused on goal protection.
+        Always stays near goal, never chases ball far from goal.
         """
-        # Goalkeepers primarily block and stay in position
-        if self.beliefs.in_defensive_third:
-            return [Actions.BLOCK, Actions.TACKLE, Actions.STAY]
-        else:
+        # Calculate distance from goal
+        distance_from_goal = np.linalg.norm(self.pos - self.goal_position)
+        
+        # If too far from goal, return to goal area
+        if distance_from_goal > self.max_distance_from_goal:
             return [Actions.MOVE, Actions.STAY]
-
-
-class FreeKickTaker(Agent):
-    """
-    Role: take-corner, Strategy: pass
-    """
+        
+        # If ball is close to goal area, can try to intercept
+        if self.beliefs.distance_to_ball and self.beliefs.distance_to_ball < 10.0:
+            if self.beliefs.distance_to_home_goal and self.beliefs.distance_to_home_goal < 15.0:
+                # Ball is near our goal - active defense
+                return [Actions.BLOCK, Actions.TACKLE, Actions.MOVE]
+        
+        # Default: stay in position and block
+        return [Actions.BLOCK, Actions.STAY]
     
-    def __init__(self, env, team: Team, pos=np.zeros(2)):
-        super().__init__(env, team, role="free-kick-taker", pos=pos)
-        
-        # Free-kick-taker specific desires
-        self.desires.keep_possession = 1.0
-        self.desires.support_teammate = 0.9
-        self.desires.create_opportunities = 0.8
-        self.desires.take_risks = 0.3
-        
-    def deliberate(self) -> List[Actions]:
-        """
-        Free-kick-taker deliberation - focused on passing and corner kicks.
-        """
-        options = super().deliberate()
-        
-        # Prioritize passing for set pieces
-        if self.beliefs.has_ball_possession:
-            return [Actions.PASS, Actions.MOVE, Actions.STAY]
-        else:
-            return options
-    
-    def take_corner(self):
-        """
-        Execute corner kick - specialized set piece behavior.
-        """
-        # This would be called during corner kick situations
-        # Find best teammate to pass to
-        teammates = [a for a in self.env.agents if a.team == self.team and a != self]
-        if teammates and self.has_ball:
-            # Strategic corner kick pass
-            best_target = max(teammates, key=lambda tm: tm.desires.score_goal)
-            self.env._pass_ball(self, best_target)
 
-
-class Player(Agent):
-    """
-    Role: position, move-ball, Strategies: go-zone, pass
-    """
-    
-    def __init__(self, env, team: Team, pos=np.zeros(2)):
-        super().__init__(env, team, role="player", pos=pos)
-        
-        # General player desires - balanced
-        self.desires.keep_possession = 0.8
-        self.desires.support_teammate = 0.7
-        self.desires.move_towards_ball = 0.6
-        self.desires.maintain_position = 0.5
-        
-    def deliberate(self) -> List[Actions]:
-        """
-        General player deliberation - balanced approach.
-        """
-        options = super().deliberate()
-        
-        # Add positional play
-        if not self.beliefs.has_ball_possession:
-            # Go to zone strategy
-            return [Actions.MOVE, Actions.PASS, Actions.STAY]
-        else:
-            # Ball possession - pass or move
-            return [Actions.PASS, Actions.MOVE, Actions.SHOOT]
-    
-    def go_zone(self, target_zone: np.ndarray):
-        """
-        Go-zone strategy - move to tactical position.
-        """
-        # Move towards assigned tactical zone
-        direction = target_zone - self.pos
-        if np.linalg.norm(direction) > 2.0:  # If not in position
-            return Actions.MOVE
-        else:
-            return Actions.STAY
 
 
 class FieldDistribution():

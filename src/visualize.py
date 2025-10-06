@@ -14,7 +14,7 @@ from typing import Optional, Dict, List, Tuple
 import argparse
 
 # Import our modules
-from agents import Defender, Attacker, Team, FieldDistribution
+from agents import Defender, Attacker, Goalkeeper, Team, FieldDistribution
 from env import Environment
 from bdi import Actions
 from main import TrainingConfig, TrainingStats, load_checkpoint
@@ -57,7 +57,7 @@ class SoccerVisualizer:
         # Visualization settings
         self.simulation_speed = 1.0  # Speed multiplier (1.0 = normal, 0.5 = half speed)
         self.show_trails = True
-        self.show_beliefs = True
+        self.show_beliefs = False
         self.show_stats = True
         self.paused = False
         
@@ -69,6 +69,10 @@ class SoccerVisualizer:
         # Agent trails for visualization
         self.agent_trails = {}
         self.max_trail_length = 30
+        
+        # Agent selection
+        self.selected_agent = None
+        self.show_agent_details = False
         
         # Current simulation state
         self.env = None
@@ -143,6 +147,17 @@ class SoccerVisualizer:
         right_penalty = pygame.Rect(self.field_margin + self.field_width - penalty_width, 
                                    penalty_y, penalty_width, penalty_height)
         pygame.draw.rect(self.screen, WHITE, right_penalty, 2)
+        
+        # Corner arcs (visual markers for corner kicks)
+        corner_radius = 15
+        # Top-left corner
+        pygame.draw.circle(self.screen, WHITE, (self.field_margin, self.field_margin), corner_radius, 2)
+        # Top-right corner
+        pygame.draw.circle(self.screen, WHITE, (self.field_margin + self.field_width, self.field_margin), corner_radius, 2)
+        # Bottom-left corner
+        pygame.draw.circle(self.screen, WHITE, (self.field_margin, self.field_margin + self.field_height), corner_radius, 2)
+        # Bottom-right corner
+        pygame.draw.circle(self.screen, WHITE, (self.field_margin + self.field_width, self.field_margin + self.field_height), corner_radius, 2)
     
     def draw_ball(self, pos: np.ndarray, vel: np.ndarray):
         """Draw the ball with motion indicators."""
@@ -191,10 +206,16 @@ class SoccerVisualizer:
             color = WHITE
             text_color = BLACK
         
+        # Highlight selected agent
+        is_selected = (self.selected_agent == agent)
+        if is_selected:
+            pygame.draw.circle(self.screen, YELLOW, screen_pos, 25, 4)
+            pygame.draw.circle(self.screen, ORANGE, screen_pos, 22, 2)
+        
         # Agent body
         radius = 15
         pygame.draw.circle(self.screen, color, screen_pos, radius)
-        pygame.draw.circle(self.screen, BLACK, screen_pos, radius, 2)
+        pygame.draw.circle(self.screen, BLACK, screen_pos, radius, 2 if not is_selected else 3)
         
         # Ball possession indicator
         if hasattr(agent, 'has_ball') and agent.has_ball:
@@ -253,6 +274,14 @@ class SoccerVisualizer:
             score_text = f"Score - Blue: {self.env.score['blue']}  White: {self.env.score['white']}"
             score_surface = self.large_font.render(score_text, True, BLACK)
             self.screen.blit(score_surface, (self.field_margin, ui_y))
+            
+            # Set piece indicator
+            if hasattr(self.env, 'set_piece_type') and self.env.set_piece_type:
+                set_piece_text = f"SET PIECE: {self.env.set_piece_type.upper().replace('_', ' ')}"
+                if hasattr(self.env, 'set_piece_team') and self.env.set_piece_team:
+                    set_piece_text += f" - {self.env.set_piece_team.name}"
+                set_piece_surface = self.font.render(set_piece_text, True, ORANGE)
+                self.screen.blit(set_piece_surface, (self.field_margin + 500, ui_y))
         
         # Episode info
         if self.total_episodes > 0:
@@ -267,14 +296,21 @@ class SoccerVisualizer:
         
         # Controls
         controls = [
-            "Controls: SPACE=Pause, +/- Speed, T=Trails, B=Beliefs, S=Stats, Q=Quit"
+            "Controls: SPACE=Pause, +/- Speed, T=Trails, B=Beliefs, S=Stats, D=Details, Q=Quit",
+            "Click on agent to select and view details (works best when paused)"
         ]
         
         control_y = ui_y + 65
         for control in controls:
             control_surface = self.small_font.render(control, True, BLACK)
             self.screen.blit(control_surface, (self.field_margin, control_y))
-            control_y += 20
+            control_y += 18
+        
+        # Selected agent indicator
+        if self.selected_agent:
+            agent_info = f"Selected: {self.selected_agent.role} ({self.selected_agent.team.name})"
+            info_surface = self.small_font.render(agent_info, True, ORANGE)
+            self.screen.blit(info_surface, (self.field_margin + 600, ui_y + 40))
         
         # Statistics (if enabled and available)
         if self.show_stats and self.stats:
@@ -315,6 +351,209 @@ class SoccerVisualizer:
             self.screen.blit(stat_surface, (stats_x, stats_y + y_offset))
             y_offset += 18
     
+    def draw_agent_details_panel(self):
+        """Draw detailed information panel for selected agent"""
+        if not self.selected_agent or not self.show_agent_details:
+            return
+        
+        agent = self.selected_agent
+        
+        # Panel dimensions and position
+        panel_width = 400
+        panel_height = self.height - 100
+        panel_x = 10
+        panel_y = 10
+        
+        # Background with border
+        panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+        pygame.draw.rect(self.screen, WHITE, panel_rect)
+        pygame.draw.rect(self.screen, BLACK, panel_rect, 3)
+        
+        # Current Y position for text
+        y = panel_y + 10
+        x_margin = panel_x + 10
+        
+        # Title
+        title_color = BLUE if agent.team == Team.BLUE else RED
+        title_text = f"{agent.role.upper()} - {agent.team.name}"
+        title_surface = self.font.render(title_text, True, title_color)
+        self.screen.blit(title_surface, (x_margin, y))
+        y += 30
+        
+        # Position info
+        pos_text = f"Position: ({agent.pos[0]:.1f}, {agent.pos[1]:.1f})"
+        vel_magnitude = np.linalg.norm(agent.vel) if hasattr(agent, 'vel') else 0
+        vel_text = f"Velocity: {vel_magnitude:.2f} m/s"
+        
+        self.screen.blit(self.small_font.render(pos_text, True, BLACK), (x_margin, y))
+        y += 18
+        self.screen.blit(self.small_font.render(vel_text, True, BLACK), (x_margin, y))
+        y += 18
+        self.screen.blit(self.small_font.render(f"Has Ball: {agent.has_ball}", True, BLACK), (x_margin, y))
+        y += 25
+        
+        # Beliefs section
+        if hasattr(agent, 'beliefs') and self.env:
+            beliefs = self.env.get_beliefs(agent)
+            
+            section_surface = self.font.render("BELIEFS", True, DARK_GREEN)
+            self.screen.blit(section_surface, (x_margin, y))
+            y += 25
+            
+            belief_lines = [
+                f"Distance to Ball: {beliefs.get('distance_to_ball', 0):.1f}m",
+                f"Distance to Goal: {beliefs.get('distance_to_goal', 0):.1f}m",
+                f"Distance to Home: {beliefs.get('distance_to_home_goal', 0):.1f}m",
+                f"Distance to Opponent: {beliefs.get('distance_to_opponent', 0):.1f}m",
+                f"Teammate Open: {beliefs.get('teammate_open', False)}",
+                f"Goal Open: {beliefs.get('goal_open', False)}",
+            ]
+            
+            if hasattr(agent, 'beliefs'):
+                belief_lines.extend([
+                    f"Has Possession: {agent.beliefs.has_ball_possession}",
+                    f"Team Has Ball: {agent.beliefs.team_has_possession}",
+                    f"In Attack Third: {agent.beliefs.in_attacking_third}",
+                    f"In Defense Third: {agent.beliefs.in_defensive_third}",
+                    f"Opponent Threat: {agent.beliefs.opponent_threatening}",
+                ])
+            
+            for line in belief_lines:
+                self.screen.blit(self.small_font.render(line, True, BLACK), (x_margin, y))
+                y += 16
+            
+            y += 10
+        
+        # Desires section
+        if hasattr(agent, 'desires'):
+            section_surface = self.font.render("DESIRES", True, DARK_GREEN)
+            self.screen.blit(section_surface, (x_margin, y))
+            y += 25
+            
+            desires = agent.desires.get_current_desires_summary()
+            desire_lines = [
+                f"Score Goal: {desires.get('score_goal', 0):.2f}",
+                f"Keep Possession: {desires.get('keep_possession', 0):.2f}",
+                f"Move to Ball: {desires.get('move_towards_ball', 0):.2f}",
+                f"Defend Goal: {desires.get('defend_goal', 0):.2f}",
+                f"Steal Ball: {desires.get('steal_ball', 0):.2f}",
+                f"Support Team: {desires.get('support_teammate', 0):.2f}",
+                f"Take Risks: {desires.get('take_risks', 0):.2f}",
+                f"Desperation: {desires.get('desperation_factor', 0):.2f}",
+                f"Confidence: {desires.get('confidence_factor', 0):.2f}",
+            ]
+            
+            for line in desire_lines:
+                self.screen.blit(self.small_font.render(line, True, BLACK), (x_margin, y))
+                y += 16
+            
+            y += 10
+        
+        # Intentions section
+        if hasattr(agent, 'intentions'):
+            section_surface = self.font.render("INTENTIONS", True, DARK_GREEN)
+            self.screen.blit(section_surface, (x_margin, y))
+            y += 25
+            
+            current_action = agent.intentions.current_action
+            commitment = agent.intentions.commitment_strength
+            
+            action_text = f"Current Action: {current_action.name if current_action else 'None'}"
+            commit_text = f"Commitment: {commitment:.2f}"
+            
+            self.screen.blit(self.small_font.render(action_text, True, BLACK), (x_margin, y))
+            y += 16
+            self.screen.blit(self.small_font.render(commit_text, True, BLACK), (x_margin, y))
+            y += 25
+        
+        # Q-Learning stats
+        if hasattr(agent, 'q_policy'):
+            section_surface = self.font.render("Q-LEARNING", True, DARK_GREEN)
+            self.screen.blit(section_surface, (x_margin, y))
+            y += 25
+            
+            stats = agent.q_policy.get_stats()
+            q_lines = [
+                f"Epsilon: {stats.get('epsilon', 0):.3f}",
+                f"Q-Table Size: {stats.get('q_table_size', 0)}",
+                f"Episodes: {stats.get('episode_count', 0)}",
+            ]
+            
+            if hasattr(agent, 'episode_rewards') and agent.episode_rewards:
+                recent = agent.episode_rewards[-10:]
+                q_lines.append(f"Avg Recent Reward: {np.mean(recent):.2f}")
+            
+            for line in q_lines:
+                self.screen.blit(self.small_font.render(line, True, BLACK), (x_margin, y))
+                y += 16
+            
+            y += 10
+        
+        # Recent actions
+        if hasattr(agent, 'actions_taken') and agent.actions_taken:
+            section_surface = self.font.render("RECENT ACTIONS", True, DARK_GREEN)
+            self.screen.blit(section_surface, (x_margin, y))
+            y += 25
+            
+            recent_actions = agent.actions_taken[-5:]
+            for action in recent_actions:
+                action_name = action.name if hasattr(action, 'name') else str(action)
+                self.screen.blit(self.small_font.render(f"- {action_name}", True, BLACK), (x_margin, y))
+                y += 16
+        
+        # Close button hint
+        hint_text = "Press ESC to close | Click agent to select"
+        hint_surface = self.small_font.render(hint_text, True, GRAY)
+        self.screen.blit(hint_surface, (x_margin, panel_y + panel_height - 20))
+    
+    def draw_set_piece_marker(self, position: np.ndarray, set_piece_type: str):
+        """Draw a visual marker for set pieces on the field."""
+        screen_pos = self.world_to_screen(position)
+        
+        if set_piece_type == 'corner_kick':
+            # Draw pulsing circle for corner kick
+            radius = 25 + int(5 * np.sin(pygame.time.get_ticks() / 200))
+            pygame.draw.circle(self.screen, ORANGE, screen_pos, radius, 4)
+            pygame.draw.circle(self.screen, YELLOW, screen_pos, radius - 5, 2)
+            
+            # Draw "CK" text
+            text = self.font.render("CK", True, ORANGE)
+            text_rect = text.get_rect(center=screen_pos)
+            self.screen.blit(text, text_rect)
+            
+        elif set_piece_type == 'throw_in':
+            # Draw arrow pointing inward from sideline
+            pygame.draw.circle(self.screen, BLUE if position[1] > 0 else RED, screen_pos, 20, 4)
+            
+            # Draw arrow
+            arrow_start = screen_pos
+            arrow_end = (screen_pos[0], screen_pos[1] + (30 if position[1] > 0 else -30))
+            pygame.draw.line(self.screen, ORANGE, arrow_start, arrow_end, 3)
+            
+            # Arrowhead
+            arrow_tip = arrow_end
+            left_point = (arrow_tip[0] - 8, arrow_tip[1] + (-8 if position[1] > 0 else 8))
+            right_point = (arrow_tip[0] + 8, arrow_tip[1] + (-8 if position[1] > 0 else 8))
+            pygame.draw.polygon(self.screen, ORANGE, [arrow_tip, left_point, right_point])
+            
+            # Draw "TI" text
+            text = self.small_font.render("THROW-IN", True, ORANGE)
+            text_rect = text.get_rect(center=(screen_pos[0], screen_pos[1] - 30))
+            self.screen.blit(text, text_rect)
+            
+        elif set_piece_type == 'goal_kick':
+            # Draw rectangle in goal area
+            pygame.draw.rect(self.screen, LIGHT_GRAY, 
+                           (screen_pos[0] - 25, screen_pos[1] - 15, 50, 30), 3)
+            
+            # Draw "GK" text
+            text = self.font.render("GK", True, WHITE)
+            text_rect = text.get_rect(center=screen_pos)
+            # Background for text
+            bg_rect = text_rect.inflate(10, 5)
+            pygame.draw.rect(self.screen, DARK_GREEN, bg_rect)
+            self.screen.blit(text, text_rect)
+    
     def handle_events(self) -> bool:
         """Handle pygame events. Returns False if should quit."""
         for event in pygame.event.get():
@@ -335,7 +574,36 @@ class SoccerVisualizer:
                     self.show_beliefs = not self.show_beliefs
                 elif event.key == pygame.K_s:
                     self.show_stats = not self.show_stats
+                elif event.key == pygame.K_d:
+                    self.show_agent_details = not self.show_agent_details
+                elif event.key == pygame.K_ESCAPE:
+                    self.selected_agent = None
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:  # Left click
+                    self._handle_agent_click(event.pos)
         return True
+    
+    def _handle_agent_click(self, mouse_pos: Tuple[int, int]):
+        """Handle mouse click to select agent"""
+        if not self.agents:
+            return
+        
+        # Find agent closest to click position
+        min_distance = 20  # Maximum click distance in pixels
+        clicked_agent = None
+        
+        for agent in self.agents:
+            screen_pos = self.world_to_screen(agent.pos)
+            distance = np.sqrt((mouse_pos[0] - screen_pos[0])**2 + (mouse_pos[1] - screen_pos[1])**2)
+            
+            if distance < min_distance:
+                min_distance = distance
+                clicked_agent = agent
+        
+        if clicked_agent:
+            self.selected_agent = clicked_agent
+            self.show_agent_details = True
+            print(f"Selected agent: {clicked_agent.role} ({clicked_agent.team.name})")
     
     def load_checkpoint_and_setup(self, checkpoint_path: str) -> bool:
         """Load checkpoint data and setup visualization."""
@@ -369,6 +637,8 @@ class SoccerVisualizer:
                     agent = Attacker(self.env, team, pos=pos)
                 elif agent_data['role'] == 'defender':
                     agent = Defender(self.env, team, pos=pos)
+                elif agent_data['role'] == 'goalkeeper':
+                    agent = Goalkeeper(self.env, team, pos=pos)
                 else:
                     agent = Attacker(self.env, team, pos=pos)  # Default
                 
@@ -435,6 +705,11 @@ class SoccerVisualizer:
             # Draw everything
             self.draw_field()
             
+            # Draw set piece indicator on field
+            if hasattr(self.env, 'set_piece_type') and self.env.set_piece_type and hasattr(self.env, 'set_piece_position'):
+                if self.env.set_piece_position is not None:
+                    self.draw_set_piece_marker(self.env.set_piece_position, self.env.set_piece_type)
+            
             # Draw ball
             self.draw_ball(self.env.ball_pos, self.env.ball_vel)
             
@@ -444,6 +719,10 @@ class SoccerVisualizer:
             
             # Draw UI
             self.draw_ui()
+            
+            # Draw agent details panel (on top of everything)
+            if self.selected_agent and self.show_agent_details:
+                self.draw_agent_details_panel()
             
             # Update display
             pygame.display.flip()
