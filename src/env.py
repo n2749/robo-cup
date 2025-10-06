@@ -590,13 +590,19 @@ class Environment:
         if not out_of_bounds and (self.ball_pos[1] <= min_y + 0.5 or self.ball_pos[1] >= max_y - 0.5):
             last_touch = self._determine_last_touch()
             throw_in_x = np.clip(self.ball_pos[0], min_x, max_x)
-            throw_in_y = max_y if self.ball_pos[1] >= max_y else min_y
+            throw_in_y = max_y - 0.1 if self.ball_pos[1] >= max_y else min_y + 0.1
             
+            # Determine which team gets throw-in
             if last_touch:
                 # Opposite team gets throw-in
                 throw_in_team = Team.WHITE if last_touch == Team.BLUE else Team.BLUE
-                self._trigger_throw_in(throw_in_team, np.array([throw_in_x, throw_in_y]))
-                out_of_bounds = True
+            else:
+                # If we can't determine last touch, randomly assign or use a default
+                # For fairness, we'll randomly assign
+                throw_in_team = Team.BLUE if np.random.random() < 0.5 else Team.WHITE
+            
+            self._trigger_throw_in(throw_in_team, np.array([throw_in_x, throw_in_y]))
+            out_of_bounds = True
         
         # Keep ball in bounds if no set piece triggered
         if not out_of_bounds:
