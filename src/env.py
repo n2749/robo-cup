@@ -222,20 +222,30 @@ class Environment:
             for opp in opponents
         )
         
-        # Calculate teammate spacing information
-        teammates_nearby = []
-        teammates_too_close = 0
-        closest_teammate_distance = None
+        # Zone information (NEW)
+        in_zone = agent.is_in_zone() if hasattr(agent, 'is_in_zone') else True
+        distance_from_zone = agent.distance_from_zone() if hasattr(agent, 'distance_from_zone') else 0.0
         
-        if teammates:
-            teammate_distances = [np.linalg.norm(agent.pos - tm.pos) for tm in teammates]
-            closest_teammate_distance = min(teammate_distances)
-            
-            # Count teammates that are too close (within 5 meters)
-            teammates_too_close = sum(1 for dist in teammate_distances if dist < 5.0)
-            
-            # List of distances to teammates within reasonable range (5-15 meters)
-            teammates_nearby = [dist for dist in teammate_distances if 5.0 <= dist <= 15.0]
+        # Clustering information (NEW)
+        teammates_closer_to_ball = 0
+        for teammate in teammates:
+            teammate_dist = np.linalg.norm(teammate.pos - self.ball_pos)
+            if teammate_dist < distance_to_ball:
+                teammates_closer_to_ball += 1
+        
+        # Enemies ahead (for forward run detection) (NEW)
+        enemies_ahead = 0
+        if agent.role == 'attacker':
+            if agent.team.name == 'BLUE':
+                # Blue attacks right
+                enemies_ahead = len([opp for opp in opponents 
+                                    if opp.role in ['defender', 'goalkeeper']
+                                    and agent.pos[0] < opp.pos[0] < self.goal_right[0]])
+            else:
+                # White attacks left
+                enemies_ahead = len([opp for opp in opponents 
+                                    if opp.role in ['defender', 'goalkeeper']
+                                    and self.goal_left[0] < opp.pos[0] < agent.pos[0]])
         
         return {
             'distance_to_ball': distance_to_ball,
@@ -244,9 +254,10 @@ class Environment:
             'distance_to_opponent': distance_to_opponent,
             'teammate_open': teammate_open,
             'goal_open': goal_open,
-            'teammates_too_close': teammates_too_close,
-            'teammates_nearby': teammates_nearby,
-            'closest_teammate_distance': closest_teammate_distance
+            'in_zone': in_zone,
+            'distance_from_zone': distance_from_zone,
+            'teammates_closer_to_ball': teammates_closer_to_ball,
+            'enemies_ahead': enemies_ahead
         }
     
 
@@ -764,8 +775,38 @@ class Environment:
         """Calculate rewards for each agent including positional and tactical play"""
         rewards = []
         
+        # Calculate clustering around ball for penalty
+        ball_cluster_agents = []
+        for a in self.agents:
+            dist = np.linalg.norm(a.pos - self.ball_pos)
+            if dist < 10.0:  # Within 10m of ball
+                ball_cluster_agents.append((a, dist))
+        
+        # Sort by distance to ball
+        ball_cluster_agents.sort(key=lambda x: x[1])
+        
         for agent, action in zip(self.agents, actions):
             reward = 0.0
+            
+            # CLUSTERING PENALTY - Only first 2 closest agents should approach ball
+            agent_distance_to_ball = np.linalg.norm(agent.pos - self.ball_pos)
+            agent_cluster_rank = None
+            for idx, (a, dist) in enumerate(ball_cluster_agents):
+                if a == agent:
+                    agent_cluster_rank = idx
+                    break
+            
+            if agent_cluster_rank is not None and agent_cluster_rank >= 2:
+                # This agent is 3rd or further from ball
+                if agent_distance_to_ball < 10.0 and agent.role != 'goalkeeper':
+                    # Moderate penalty for clustering (not one of the 2 closest)
+                    # Reduced from 3.0 to make learning easier
+                    clustering_penalty = 1.5 - (agent_cluster_rank - 2) * 0.3
+                    reward -= max(0.3, clustering_penalty)
+                    
+                    # Additional penalty if very close to ball
+                    if agent_distance_to_ball < 5.0:
+                        reward -= 1.0  # Reduced from 2.0
             
             # Positional discipline rewards
             in_zone = False
@@ -775,24 +816,41 @@ class Environment:
                 
                 if in_zone:
                     # Reward for being in zone
-                    reward += 1.0
+                    reward += 1.0  # Moderate reward
                 else:
-                    # Penalty for being out of zone (stronger penalty for defenders/attackers)
+                    # Penalty for being out of zone - but not too harsh
                     if agent.role in ['defender', 'attacker']:
-                        penalty = min(5.0, distance_from_zone * 0.3)
-                        reward -= penalty
-                    else:
-                        reward -= distance_from_zone * 0.1
+                        # Only penalize if significantly out of zone
+                        if distance_from_zone > 10.0:
+                            penalty = min(3.0, (distance_from_zone - 10.0) * 0.2)
+                            reward -= penalty
+                    elif agent.role == 'midfielder':
+                        # Midfielders have more freedom
+                        if distance_from_zone > 15.0:
+                            reward -= distance_from_zone * 0.1
             
             # Role-specific positioning rewards
             if agent.role == 'defender':
-                # Defenders rewarded for staying back
+                # Defenders rewarded for staying back (but not too much to make them passive)
                 if agent.team.name == 'BLUE':
                     if agent.pos[0] < -10.0:  # Staying in defensive half
-                        reward += 0.5
+                        reward += 0.3  # Reduced from 0.5
                 else:
                     if agent.pos[0] > 10.0:
-                        reward += 0.5
+                        reward += 0.3  # Reduced from 0.5
+                
+                # Reward defender for active play when ball is in their zone
+                if in_zone:
+                    ball_in_defensive_third = False
+                    if agent.team.name == 'BLUE':
+                        ball_in_defensive_third = self.ball_pos[0] < -15.0
+                    else:
+                        ball_in_defensive_third = self.ball_pos[0] > 15.0
+                    
+                    if ball_in_defensive_third:
+                        # Ball is in defensive area - reward active defense
+                        if action in [Actions.TACKLE, Actions.BLOCK, Actions.MOVE]:
+                            reward += 0.5
                 
                 # Reward defender for passing when at zone boundary with ball
                 if agent.has_ball and action == Actions.PASS:
@@ -812,6 +870,50 @@ class Environment:
                         reward += 0.5
                 else:
                     if agent.pos[0] < -10.0:
+                        reward += 0.5
+                
+                # FORWARD RUN REWARD - Encourage attackers to run toward goal when few defenders
+                if agent.team.name == 'BLUE':
+                    goal_pos = self.goal_right
+                    # Count enemy defenders between attacker and goal
+                    enemies_ahead = [a for a in self.agents 
+                                   if a.team != agent.team 
+                                   and a.role in ['defender', 'goalkeeper']
+                                   and agent.pos[0] < a.pos[0] < goal_pos[0]]
+                else:
+                    goal_pos = self.goal_left
+                    enemies_ahead = [a for a in self.agents 
+                                   if a.team != agent.team 
+                                   and a.role in ['defender', 'goalkeeper']
+                                   and goal_pos[0] < a.pos[0] < agent.pos[0]]
+                
+                # If few defenders (0-1) between attacker and goal, reward forward movement
+                if len(enemies_ahead) <= 1:
+                    distance_to_goal = np.linalg.norm(agent.pos - goal_pos)
+                    
+                    # Reward for being close to goal with few defenders
+                    if distance_to_goal < 30.0:
+                        # Progressive reward - closer is better
+                        proximity_reward = 3.0 * (1.0 - distance_to_goal / 30.0)  # 0 to 3.0
+                        reward += proximity_reward
+                    
+                    # Strong reward for moving toward goal (encourage forward runs)
+                    if action == Actions.MOVE and not agent.has_ball:
+                        # Check if moving toward goal
+                        direction_to_goal = goal_pos - agent.pos
+                        if np.linalg.norm(direction_to_goal) > 0:
+                            direction_to_goal = direction_to_goal / np.linalg.norm(direction_to_goal)
+                            velocity = agent.vel if hasattr(agent, 'vel') and np.linalg.norm(agent.vel) > 0 else np.zeros(2)
+                            if np.linalg.norm(velocity) > 0:
+                                velocity_normalized = velocity / np.linalg.norm(velocity)
+                                # Dot product: positive if moving toward goal
+                                forward_component = np.dot(velocity_normalized, direction_to_goal)
+                                if forward_component > 0.3:  # Relaxed threshold from 0.5
+                                    reward += 2.5  # Increased from 1.5 - strong incentive!
+                elif len(enemies_ahead) == 2:
+                    # Even with 2 defenders, some reward for forward positioning
+                    distance_to_goal = np.linalg.norm(agent.pos - goal_pos)
+                    if distance_to_goal < 35.0:
                         reward += 0.5
                 
                 # Reward attacker for being ready to receive (in zone, no ball)
@@ -837,19 +939,25 @@ class Environment:
                 reward += 5.0
             
             # Distance to ball - only reward if it's their job to get it
-            distance_to_ball = np.linalg.norm(agent.pos - self.ball_pos)
+            distance_to_ball = agent_distance_to_ball
             
-            # Only midfielders and players without specific zones get ball proximity rewards
-            # Defenders and attackers should focus on their zones
-            if agent.role in ['midfielder', 'player']:
-                reward += max(0, 3.0 - distance_to_ball * 0.1)
-            elif agent.role in ['defender', 'attacker']:
-                # Only reward if ball is in their zone
-                if in_zone and distance_to_ball < 15.0:
+            # Only reward ball proximity for the 2 closest agents (reduce clustering)
+            if agent_cluster_rank is not None and agent_cluster_rank < 2:
+                # One of the 2 closest - can approach ball
+                if agent.role in ['midfielder', 'player']:
                     reward += max(0, 2.0 - distance_to_ball * 0.1)
-                # Small reward even if ball is nearby but they're in position
-                elif in_zone:
-                    reward += 0.2
+                elif agent.role in ['defender', 'attacker']:
+                    # Only reward if ball is in their zone
+                    if in_zone and distance_to_ball < 15.0:
+                        reward += max(0, 1.5 - distance_to_ball * 0.1)
+                    # Small reward even if ball is nearby but they're in position
+                    elif in_zone:
+                        reward += 0.2
+            else:
+                # Not one of the 2 closest - should NOT approach ball
+                # Only reward for staying in zone, not for ball proximity
+                if in_zone:
+                    reward += 0.3  # Reward for good positioning away from ball
             
             # Action-specific rewards
             if action == Actions.PASS and agent.has_ball:

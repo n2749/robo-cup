@@ -39,14 +39,14 @@ class Agent(ABC):
         self.intentions = Intentions()
         self.reasoning_engine = BDIReasoningEngine()
         
-        # Q-learning integration
+        # Q-learning integration with slower decay
         self.q_policy = QLearningPolicy(
             actions=Actions.get_all_actions(),
-            alpha=0.1,
+            alpha=0.2,          # Increased from 0.1 for faster learning
             gamma=0.95,
             eps_start=1.0,
-            eps_end=0.05,
-            eps_decay=0.995
+            eps_end=0.15,       # Increased from 0.05 to keep exploring longer
+            eps_decay=0.9995    # Much slower decay from 0.995
         )
         
         # Memory for learning
@@ -362,7 +362,7 @@ class Defender(Agent):
     
     def deliberate(self) -> List[Actions]:
         """
-        Defender-specific deliberation with zone awareness.
+        Defender-specific deliberation with zone awareness and anti-clustering.
         """
         options = super().deliberate()
         
@@ -375,6 +375,23 @@ class Defender(Agent):
             if distance_from_zone > 15.0:
                 # Must return to zone
                 return [Actions.MOVE, Actions.STAY]
+        
+        # Check if should avoid ball (anti-clustering)
+        if self.env and not self.has_ball:
+            teammates_closer = 0
+            my_dist = np.linalg.norm(self.pos - self.env.ball_pos)
+            for agent in self.env.agents:
+                if agent.team == self.team and agent != self:
+                    their_dist = np.linalg.norm(agent.pos - self.env.ball_pos)
+                    if their_dist < my_dist:
+                        teammates_closer += 1
+            
+            # If 2+ teammates closer to ball, focus on position not ball
+            if teammates_closer >= 2:
+                if self.is_in_zone():
+                    return [Actions.STAY, Actions.BLOCK]
+                else:
+                    return [Actions.MOVE, Actions.STAY]  # Return to zone
         
         # If have ball and near attacking zone boundary, should pass
         if self.has_ball:
@@ -436,12 +453,32 @@ class Attacker(Agent):
                 else:
                     return [Actions.PASS, Actions.MOVE, Actions.SHOOT]
             else:
-                # In position without ball - stay ready to receive
-                if self.beliefs.distance_to_ball and self.beliefs.distance_to_ball < 15.0:
-                    return [Actions.MOVE, Actions.TACKLE, Actions.STAY]
+                # In position without ball - check if should approach or stay
+                # Count how many teammates are closer to ball
+                if self.env:
+                    teammates_closer = 0
+                    my_dist = np.linalg.norm(self.pos - self.env.ball_pos) if self.beliefs.distance_to_ball else 999
+                    for agent in self.env.agents:
+                        if agent.team == self.team and agent != self:
+                            their_dist = np.linalg.norm(agent.pos - self.env.ball_pos)
+                            if their_dist < my_dist:
+                                teammates_closer += 1
+                    
+                    # If 2+ teammates closer, stay in position (avoid clustering)
+                    if teammates_closer >= 2:
+                        return [Actions.STAY, Actions.MOVE]
+                    # If 0-1 teammates closer and ball is close, can move to it
+                    elif self.beliefs.distance_to_ball and self.beliefs.distance_to_ball < 15.0:
+                        return [Actions.MOVE, Actions.TACKLE, Actions.STAY]
+                    else:
+                        # Ball far away - maintain position
+                        return [Actions.STAY, Actions.MOVE]
                 else:
-                    # Ball far away - maintain position
-                    return [Actions.STAY, Actions.MOVE]
+                    # Fallback if no env access
+                    if self.beliefs.distance_to_ball and self.beliefs.distance_to_ball < 15.0:
+                        return [Actions.MOVE, Actions.TACKLE, Actions.STAY]
+                    else:
+                        return [Actions.STAY, Actions.MOVE]
         
         # Normal offensive deliberation
         if self.beliefs.in_attacking_third or self.beliefs.has_ball_possession:

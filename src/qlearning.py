@@ -43,6 +43,7 @@ class QLearningPolicy:
     def _state_key(self, beliefs) -> Tuple:
         """
         Convert beliefs to a discrete state representation for Q-table indexing.
+        Enhanced with zone and clustering information.
         
         Args:
             beliefs: Agent's current beliefs
@@ -60,13 +61,27 @@ class QLearningPolicy:
         teammate_open = bool(beliefs.teammate_open) if beliefs.teammate_open is not None else False
         goal_open = bool(beliefs.goal_open) if beliefs.goal_open is not None else False
         
+        # Zone-based states (NEW)
+        in_zone = bool(getattr(beliefs, 'in_zone', True))
+        distance_from_zone_bucket = min(3, int(getattr(beliefs, 'distance_from_zone', 0) / 10.0))
+        
+        # Clustering context (NEW)
+        teammates_closer_to_ball = min(3, int(getattr(beliefs, 'teammates_closer_to_ball', 0)))
+        
+        # Role-specific context (NEW)
+        enemies_ahead = min(3, int(getattr(beliefs, 'enemies_ahead', 2)))  # For attackers
+        
         return (
             distance_to_ball_bucket,
             distance_to_goal_bucket, 
             distance_to_home_bucket,
             distance_to_opponent_bucket,
             teammate_open,
-            goal_open
+            goal_open,
+            in_zone,
+            distance_from_zone_bucket,
+            teammates_closer_to_ball,
+            enemies_ahead
         )
     
     def _q_key(self, state: Tuple, action: Actions) -> Tuple:
