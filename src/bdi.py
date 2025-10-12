@@ -517,7 +517,7 @@ class Desires:
             self.take_risks *= 0.7
         
         # Close to ball - increase ball-related desires
-        if beliefs.distance_to_ball and beliefs.distance_to_ball < 10.0:
+        if beliefs.distance_to_ball and beliefs.distance_to_ball >= 4:
             self.move_towards_ball *= 1.3
             if beliefs.distance_to_ball < 3.0:
                 if beliefs.goal_open:
@@ -537,7 +537,6 @@ class Desires:
         # Teammate support
         if beliefs.teammate_open:
             self.support_teammate *= 1.4
-            if ball_possession == 'my_team' and beliefs.has_ball_possession:
         
         # Goal opportunity
         if beliefs.goal_open:
