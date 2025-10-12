@@ -18,12 +18,15 @@ class Agent(ABC):
     Combines Belief-Desire-Intention architecture with reinforcement learning.
     """
     
-    def __init__(self, env, team: Team, role: str = "midfielder", pos=np.zeros(2)):
+    def __init__(self, env, team: Team, role: str = "midfielder", pos=np.zeros(2), base_pos=np.zeros(2)):
         # Environment and physical properties
         self.env = env
         self.env.register(self)
         self.team = team
-        self.pos = pos.copy() if pos is not None else np.zeros(2)
+        self.pos = pos.copy()
+        self.base_pos = base_pos.copy()
+        # Remember starting position so environment can restore it on reset
+        self.initial_pos = self.pos.copy()
         self.vel = np.zeros(2)
         self.has_ball = False
         self.role = role
@@ -284,7 +287,10 @@ class Agent(ABC):
             'my_team_score': my_score,
             'opponent_score': opponent_score,
             'time_remaining': time_remaining,
-            'ball_possession': ball_possession
+            'ball_possession': ball_possession,
+            'teammates_too_close': self.beliefs.teammates_too_close,
+            'teammates_nearby': self.beliefs.teammates_nearby,
+            'closest_teammate_distance': self.beliefs.closest_teammate_distance
         }
     
     
@@ -319,6 +325,7 @@ class Agent(ABC):
         """
         Reset agent state for new episode.
         """
+        self.pos = self.base_pos.copy()
         self.previous_beliefs = None
         self.previous_action = None
         self.cumulative_reward = 0.0
@@ -352,8 +359,8 @@ class Defender(Agent):
     Stays in defensive zone and passes forward when ball reaches zone boundary.
     """
     
-    def __init__(self, env, team: Team, pos=np.zeros(2)):
-        super().__init__(env, team, role="defender", pos=pos)
+    def __init__(self, env, team: Team, pos=np.zeros(2), base_pos=np.zeros(2)):
+        super().__init__(env, team, role="defender", pos=pos, base_pos=base_pos)
     
     def deliberate(self) -> List[Actions]:
         """
@@ -400,8 +407,8 @@ class Attacker(Agent):
     Stays in attacking zone, ready to receive passes and score.
     """
     
-    def __init__(self, env, team: Team, pos=np.zeros(2)):
-        super().__init__(env, team, role="attacker", pos=pos)
+    def __init__(self, env, team: Team, pos=np.zeros(2), base_pos=np.zeros(2)):
+        super().__init__(env, team, role="attacker", pos=pos, base_pos=base_pos)
     
     def deliberate(self) -> List[Actions]:
         """
@@ -453,8 +460,8 @@ class Midfielder(Agent):
     Desires are now dynamically managed by the BDI system.
     """
     
-    def __init__(self, env, team: Team, pos=np.zeros(2)):
-        super().__init__(env, team, role="midfielder", pos=pos)
+    def __init__(self, env, team: Team, pos=np.zeros(2), base_pos=np.zeros(2)):
+        super().__init__(env, team, role="midfielder", pos=pos, base_pos=base_pos)
         # Desires are dynamically set based on role and game state
 
 
@@ -464,8 +471,8 @@ class Goalkeeper(Agent):
     Stays near goal and protects it. Does not chase the ball.
     """
     
-    def __init__(self, env, team: Team, pos=np.zeros(2)):
-        super().__init__(env, team, role="goalkeeper", pos=pos)
+    def __init__(self, env, team: Team, pos=np.zeros(2), base_pos=np.zeros(2)):
+        super().__init__(env, team, role="goalkeeper", pos=pos, base_pos=base_pos)
         
         # Store goal position for goalkeeper
         if team.name == 'BLUE':

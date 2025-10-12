@@ -1,4 +1,5 @@
 import random
+import math
 import numpy as np
 from collections import defaultdict
 from typing import List, Tuple, Any
@@ -51,11 +52,20 @@ class QLearningPolicy:
             Tuple representing the state
         """
         # Discretize continuous values for Q-table
-        distance_to_ball_bucket = min(4, int(beliefs.distance_to_ball / 10.0)) if beliefs.distance_to_ball is not None else 0
-        distance_to_goal_bucket = min(4, int(beliefs.distance_to_goal / 20.0)) if beliefs.distance_to_goal is not None else 0
-        distance_to_home_bucket = min(4, int(beliefs.distance_to_home_goal / 20.0)) if beliefs.distance_to_home_goal is not None else 0
-        distance_to_opponent_bucket = min(4, int(beliefs.distance_to_opponent / 10.0)) if beliefs.distance_to_opponent is not None else 0
-        
+        MAX_BALL_DISTANCE = math.sqrt(100**2 + 65**2)
+        MAX_GOAL_DISTANCE = math.sqrt(100**2 + 65**2)
+
+        def log_normalize(d, v_max):
+            epsilon = 1e-9
+            return math.floor(math.log(max(d / v_max, epsilon), 2)) if d is not None else 0
+
+        distance_to_ball_bucket = log_normalize(beliefs.distance_to_ball, MAX_BALL_DISTANCE)
+        distance_to_goal_bucket = log_normalize(beliefs.distance_to_goal, MAX_GOAL_DISTANCE)
+        distance_to_home_bucket = log_normalize(beliefs.distance_to_home_goal, MAX_GOAL_DISTANCE)
+        distance_to_opponent_bucket = log_normalize(beliefs.distance_to_opponent, MAX_BALL_DISTANCE)
+
+        # print(f"distance_to_ball={beliefs.distance_to_ball}, v_max={MAX_BALL_DISTANCE}, distance_to_ball_bucket={distance_to_ball_bucket}")
+
         # Boolean states
         teammate_open = bool(beliefs.teammate_open) if beliefs.teammate_open is not None else False
         goal_open = bool(beliefs.goal_open) if beliefs.goal_open is not None else False
