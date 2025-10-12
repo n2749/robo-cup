@@ -148,6 +148,7 @@ def create_team(team: Team, formation: SoccerFormation, env: Environment) -> Lis
     positions = formation.get_positions(team, env.width, env.height)
     
     for role, position in positions:
+        print("in src/team_config.py")
         print(f"role={role} position={position}")
         if role == "goalkeeper":
             agent = Goalkeeper(env, team, base_pos=position)
