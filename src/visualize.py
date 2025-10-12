@@ -433,7 +433,6 @@ class SoccerVisualizer:
             desires = agent.desires.get_current_desires_summary()
             desire_lines = [
                 f"Score Goal: {desires.get('score_goal', 0):.2f}",
-                f"Keep Possession: {desires.get('keep_possession', 0):.2f}",
                 f"Move to Ball: {desires.get('move_towards_ball', 0):.2f}",
                 f"Defend Goal: {desires.get('defend_goal', 0):.2f}",
                 f"Steal Ball: {desires.get('steal_ball', 0):.2f}",
