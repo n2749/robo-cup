@@ -24,7 +24,6 @@ class Agent(ABC):
         self.env.register(self)
         self.team = team
         self.pos = pos.copy()
-        print(f"init base_pos {base_pos}")
         self.base_pos = base_pos.copy()
         # Remember starting position so environment can restore it on reset
         self.initial_pos = self.pos.copy()
