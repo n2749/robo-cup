@@ -94,7 +94,6 @@ class Environment:
         # Reset agents to starting positions (field center at 0,0)
         for i, agent in enumerate(self.agents):
             # If agent has an initial_pos, use it; otherwise fall back to default layout
-            # print(f"agent.base_pos {agent.base_pos}")
             if agent.base_pos is not None:
                 agent.pos = agent.base_pos.copy()
             else:
