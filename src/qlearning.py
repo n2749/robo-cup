@@ -57,7 +57,10 @@ class QLearningPolicy:
 
         def log_normalize(d, v_max):
             epsilon = 1e-9
-            return math.floor(math.log(max(d / v_max, epsilon), 2)) if d is not None else 0
+            d = d if d is not None else 0
+            log = math.log(max(d / v_max, epsilon), 1/2)
+            norm = min(math.floor(log), 10)
+            return norm
 
         distance_to_ball_bucket = log_normalize(beliefs.distance_to_ball, MAX_BALL_DISTANCE)
         distance_to_goal_bucket = log_normalize(beliefs.distance_to_goal, MAX_GOAL_DISTANCE)
