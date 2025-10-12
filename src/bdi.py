@@ -1,6 +1,394 @@
 from enum import Enum
-from typing imporsupport_teammate': 0.8,
-                'create_opportunities': 0.7,
+from typing import Dict, Any, Optional, List
+import numpy as np
+
+
+class Beliefs:
+    """
+    Represents an agent's beliefs about the current state of the soccer
+    environment. Enhanced with confidence tracking and temporal updates. These
+    beliefs are used both for BDI reasoning and as state representation for
+    Q-learning.
+    """
+    
+    def __init__(self):
+        # Spatial beliefs
+        self.distance_to_goal: Optional[float] = None
+        self.distance_to_home_goal: Optional[float] = None
+        self.distance_to_ball: Optional[float] = None
+        self.distance_to_opponent: Optional[float] = None
+        
+        # Tactical beliefs
+        self.teammate_open: Optional[bool] = None
+        self.goal_open: Optional[bool] = None
+        
+        # Additional beliefs for better decision making
+        self.has_ball_possession: bool = False
+        self.team_has_possession: bool = False
+        self.in_attacking_third: bool = False
+        self.in_defensive_third: bool = False
+        self.opponent_threatening: bool = False
+        
+        # Teammate spacing beliefs
+        self.teammates_too_close: int = 0
+        self.teammates_nearby: List[float] = []  # Distances to nearby teammates
+        self.closest_teammate_distance: Optional[float] = None
+        
+        # World model with confidence tracking
+        # Ball tracking with confidence
+        self.wm_ball: Optional[np.ndarray] = None  # μglobal position
+        self.wm_ball_confidence: float = 1.0  # σsum_ball
+        self.wm_ball_timestamp: float = 0.0  # τsum_ball
+        self.saw_ball: bool = False  # sum_sawball
+        
+        # Opponent tracking with confidence  
+        self.wm_opponents: List[dict] = []  # List of opponent observations
+        self.wm_teammates: List[dict] = []  # List of teammate observations
+        
+        # Vision and localization
+        self.wm_position: Optional[np.ndarray] = None  # Robot position
+        self.wm_heading: Optional[float] = None  # Robot heading
+        
+        # Temporal parameters
+        self.current_time: float = 0.0  # τcurrent
+        self.confidence_threshold: float = 0.5  # σthreshold
+        self.time_threshold: float = 5.0  # τthreshold
+        self.small_error: float = 0.1  # SMALL_ERROR
+        
+    def update(self, belief_dict: Dict[str, Any]):
+        """
+        Update beliefs from environment observations.
+        
+        Args:
+            belief_dict: Dictionary of belief updates from environment
+        """
+        # Update basic beliefs
+        self.distance_to_goal = belief_dict.get('distance_to_goal')
+        self.distance_to_home_goal = belief_dict.get('distance_to_home_goal')
+        self.distance_to_ball = belief_dict.get('distance_to_ball')
+        self.distance_to_opponent = belief_dict.get('distance_to_opponent')
+        self.teammate_open = belief_dict.get('teammate_open')
+        self.goal_open = belief_dict.get('goal_open')
+        
+        # Derive additional beliefs
+        self.has_ball_possession = belief_dict.get('has_ball', False)
+        self.team_has_possession = belief_dict.get('team_has_ball', False)
+        
+        # Tactical position assessment
+        if self.distance_to_goal is not None:
+            self.in_attacking_third = self.distance_to_goal < 30.0
+            self.in_defensive_third = self.distance_to_home_goal < 30.0
+        
+        # Threat assessment
+        if self.distance_to_opponent is not None:
+            self.opponent_threatening = self.distance_to_opponent < 10.0
+        
+        # Teammate spacing assessment
+        self.teammates_too_close = belief_dict.get('teammates_too_close', 0)
+        self.teammates_nearby = belief_dict.get('teammates_nearby', [])
+        self.closest_teammate_distance = belief_dict.get('closest_teammate_distance', None)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert beliefs to dictionary for serialization or debugging"""
+        return {
+            'distance_to_goal': self.distance_to_goal,
+            'distance_to_home_goal': self.distance_to_home_goal,
+            'distance_to_ball': self.distance_to_ball,
+            'distance_to_opponent': self.distance_to_opponent,
+            'teammate_open': self.teammate_open,
+            'goal_open': self.goal_open,
+            'has_ball_possession': self.has_ball_possession,
+            'team_has_possession': self.team_has_possession,
+            'in_attacking_third': self.in_attacking_third,
+            'in_defensive_third': self.in_defensive_third,
+            'opponent_threatening': self.opponent_threatening,
+            'teammates_too_close': self.teammates_too_close,
+            'teammates_nearby': self.teammates_nearby,
+            'closest_teammate_distance': self.closest_teammate_distance,
+            'wm_ball': self.wm_ball.tolist() if self.wm_ball is not None else None,
+            'wm_ball_confidence': self.wm_ball_confidence,
+            'current_time': self.current_time
+        }
+    
+    def update_world_model(self, robot_position: np.ndarray, robot_angle: float, 
+                          ball_pos: Optional[np.ndarray], op_pos: List[np.ndarray], 
+                          current_time: float):
+        """
+        UPDATEWORLDMODEL procedure
+        
+        Args:
+            robot_position: Robot position
+            robot_angle: Robot heading angle
+            ball_pos: Observed ball position (None if not seen)
+            op_pos: List of observed opponent positions
+            current_time: Current simulation time
+        """
+        self.current_time = current_time
+        
+        # UPDATELOCALIZATION
+        self._update_localization(robot_position, robot_angle)
+        
+        # UPDATEVISION
+        self._update_vision(ball_pos, op_pos, current_time)
+        
+        # UPDATESHAREDINFORMATION
+        self._update_shared_information(current_time)
+        
+        # UPDATETIME
+        self._update_time(current_time)
+    
+    def _update_localization(self, robot_position: np.ndarray, robot_angle: float):
+        """
+        UPDATELOCALIZATION procedure - simply copies localization info.
+        """
+        self.wm_position = robot_position.copy()
+        self.wm_heading = robot_angle
+    
+    def _update_vision(self, ball_pos: Optional[np.ndarray], op_pos: List[np.ndarray], 
+                      current_time: float):
+        """
+        UPDATEVISION procedure.
+        Updates ball and opponent positions from vision module.
+        """
+        # Update ball position
+        if ball_pos is not None:
+            # Convert to global coordinates
+            mu_global = self.wm_position + self._rotate(ball_pos, self.wm_heading)
+            sigma_global = self.small_error  # SMALL_ERROR
+            
+            # MERGE with existing ball belief
+            self.wm_ball = self._merge_position(self.wm_ball, mu_global, 
+                                              self.wm_ball_confidence, sigma_global)
+            self.wm_ball_confidence = sigma_global
+            self.wm_ball_timestamp = current_time
+            self.saw_ball = True
+        
+        # Update opponent positions
+        for i, op_position in enumerate(op_pos):
+            mu_global = self.wm_position + self._rotate(op_position, self.wm_heading)
+            
+            # Find closest existing opponent belief
+            best_match_idx = -1
+            min_distance = float('inf')
+            
+            for j, existing_opp in enumerate(self.wm_opponents):
+                if 'position' in existing_opp:
+                    dist = np.linalg.norm(existing_opp['position'] - mu_global)
+                    if dist < min_distance:
+                        min_distance = dist
+                        best_match_idx = j
+            
+            op_threshold = 5.0  # OP_THRESHOLD
+            
+            if min_distance < op_threshold:
+                # Update existing opponent
+                sigma_global = self.small_error
+                self.wm_opponents[best_match_idx] = {
+                    'position': self._merge_position(
+                        self.wm_opponents[best_match_idx]['position'],
+                        mu_global, 
+                        self.wm_opponents[best_match_idx].get('confidence', 1.0),
+                        sigma_global
+                    ),
+                    'confidence': sigma_global,
+                    'timestamp': current_time
+                }
+            else:
+                # Find oldest opponent to replace or add new
+                if len(self.wm_opponents) < 11:  # Max opponents in 11v11
+                    self.wm_opponents.append({
+                        'position': mu_global,
+                        'confidence': self.small_error,
+                        'timestamp': current_time
+                    })
+                else:
+                    # Replace oldest
+                    oldest_idx = min(range(len(self.wm_opponents)),
+                                   key=lambda k: self.wm_opponents[k].get('timestamp', 0))
+                    self.wm_opponents[oldest_idx] = {
+                        'position': mu_global,
+                        'confidence': self.small_error,
+                        'timestamp': current_time
+                    }
+    
+    def _update_shared_information(self, current_time: float):
+        """
+        Request ball location from shared world model if not seen recently.
+        """
+        # Check if ball hasn't been seen in a long time
+        if current_time - self.wm_ball_timestamp > self.time_threshold:
+            # Request from shared world model
+            shared_ball = self.get_ball_location(current_time, robot_id=id(self))
+            
+            if shared_ball is not None:
+                self.wm_ball = self._merge_position(self.wm_ball, shared_ball['position'],
+                                                  self.wm_ball_confidence, 
+                                                  shared_ball['confidence'])
+                self.wm_ball_confidence = shared_ball['confidence']
+                self.wm_ball_timestamp = current_time
+    
+    def _update_time(self, current_time: float):
+        """
+        Add error to standard deviations of objects not updated this time period.
+        """
+        # Update ball confidence if not seen this timestep
+        if self.wm_ball_timestamp != current_time:
+            self.wm_ball_confidence += self.small_error
+        
+        # Update opponent confidences
+        for opponent in self.wm_opponents:
+            if opponent.get('timestamp', 0) != current_time:
+                opponent['confidence'] = opponent.get('confidence', 1.0) + self.small_error
+    
+    def get_ball_location(self, current_time: float, robot_id: int) -> Optional[dict]:
+        """
+        Get best ball location from shared world model.
+        
+        Args:
+            current_time: Current time
+            robot_id: ID of requesting robot
+            
+        Returns:
+            Dictionary with ball position and confidence, or None
+        """
+        # This would typically query other agents or a shared world model
+        # For now, return None (no shared information available)
+        # In a full implementation, this would iterate through all agents
+        # and find the one with the most confident ball observation
+        return None
+    
+    def is_valid_observation(self, timestamp: float, confidence: float, 
+                           current_time: float, saw_ball: bool) -> bool:
+        """
+        Args:
+            timestamp: When observation was made
+            confidence: Confidence of observation
+            current_time: Current time
+            saw_ball: Whether ball was actually seen
+            
+        Returns:
+            True if observation is valid
+        """
+        # Time freshness check
+        if current_time - timestamp > self.time_threshold:
+            return False
+        
+        # Confidence check
+        if confidence > self.confidence_threshold:
+            return False
+        
+        # Data integrity check
+        if not saw_ball:
+            return False
+        
+        return True
+    
+    def _rotate(self, vector: np.ndarray, angle: float) -> np.ndarray:
+        """
+        ROTATE function for coordinate transformation.
+        """
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        rotation_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+        return rotation_matrix @ vector
+    
+    def _merge_position(self, pos1: Optional[np.ndarray], pos2: np.ndarray, 
+                       conf1: float, conf2: float) -> np.ndarray:
+        """
+        MERGE function for combining position estimates with confidence weighting.
+        """
+        if pos1 is None:
+            return pos2.copy()
+        
+        # Weight by inverse confidence (lower confidence = higher weight)
+        w1 = 1.0 / (conf1 + 1e-6)
+        w2 = 1.0 / (conf2 + 1e-6)
+        total_weight = w1 + w2
+        
+        return (pos1 * w1 + pos2 * w2) / total_weight
+
+
+class Desires:
+    """
+    Represents an agent's dynamic desires/goals in the BDI architecture.
+    Desires adapt to game state, role, and tactical situations in real-time.
+    These influence action selection and can be used to bias Q-learning rewards.
+    """
+    
+    def __init__(self, role: str = "midfielder"):
+        # Base desires (role-dependent defaults)
+        self.role = role
+
+        # PASS = 1
+        # TACKLE = 2
+        # SHOOT = 3
+        # BLOCK = 4
+        # MOVE = 5
+        # STAY = 6
+        
+        # Current dynamic desires (updated each cycle)
+        self.score_goal = 0.5
+        self.move_towards_ball = 0.5
+        self.defend_goal = 0.5
+        self.steal_ball = 0.5
+        self.block_opponent = 0.5
+        self.maintain_position = 0.5
+        self.support_teammate = 0.5
+        self.preserve_energy = 0.3
+        self.take_risks = 0.5
+        self.disperse_from_teammates = 0.6  # Desire to maintain spacing
+        
+        # Base role desires (used as baseline)
+        self.base_desires = self._get_base_desires_for_role(role)
+        
+        # Game state modifiers
+        self.desperation_factor = 0.0  # Increases when losing
+        self.confidence_factor = 1.0   # Increases when winning
+        self.fatigue_factor = 0.0      # Increases over time
+        
+        # Initialize with base desires
+        self._apply_base_desires()
+    
+    def _get_base_desires_for_role(self, role: str) -> dict:
+        """Get base desire values for a specific role."""
+        if role == 'attacker':
+            return {
+                'score_goal': 1.0,
+                'move_towards_ball': 0.9,
+                'defend_goal': 0.3,
+                'take_risks': 0.7,
+                'steal_ball': 0.4,
+                'block_opponent': 0.3,
+                'maintain_position': 0.4,
+                'support_teammate': 0.6,
+                'disperse_from_teammates': 0.5
+            }
+        elif role == 'defender':
+            return {
+                'defend_goal': 1.0,
+                'steal_ball': 0.9,
+                'block_opponent': 0.8,
+                'score_goal': 0.2,
+                'take_risks': 0.2,
+                'move_towards_ball': 0.5,
+                'maintain_position': 0.8,
+                'support_teammate': 0.7,
+                'disperse_from_teammates': 0.8
+            }
+        elif role == 'goalkeeper':
+            return {
+                'defend_goal': 1.0,
+                'block_opponent': 1.0,
+                'steal_ball': 0.6,
+                'score_goal': 0.0,
+                'take_risks': 0.1,
+                'move_towards_ball': 0.3,
+                'maintain_position': 0.9,
+                'support_teammate': 0.5,
+                'disperse_from_teammates': 0.3
+            }
+        else:  # midfielder
+            return {
+                'support_teammate': 0.8,
                 'take_risks': 0.5,
                 'score_goal': 0.6,
                 'defend_goal': 0.6,
@@ -108,7 +496,6 @@ from typing imporsupport_teammate': 0.8,
         elif ball_possession == 'my_team':
             # Increase attacking desires when we have ball
             self.score_goal *= 1.2
-            self.create_opportunities *= 1.3
             self.support_teammate *= 1.2
             self.steal_ball *= 0.7
     
@@ -118,7 +505,6 @@ from typing imporsupport_teammate': 0.8,
         # In attacking third - more attacking desires
         if beliefs.in_attacking_third:
             self.score_goal *= 1.4
-            self.create_opportunities *= 1.3
             self.take_risks *= 1.2
             self.defend_goal *= 0.7
             
@@ -152,7 +538,6 @@ from typing imporsupport_teammate': 0.8,
         if beliefs.teammate_open:
             self.support_teammate *= 1.4
             if ball_possession == 'my_team' and beliefs.has_ball_possession:
-                self.create_opportunities *= 1.3  # Create plays when teammate is open
         
         # Goal opportunity
         if beliefs.goal_open:
@@ -217,7 +602,7 @@ from typing imporsupport_teammate': 0.8,
     def _clamp_desires(self):
         """Ensure all desires stay within reasonable bounds."""
         desire_attributes = [
-            'score_goal', 'create_opportunities', 'move_towards_ball',
+            'score_goal', 'move_towards_ball',
             'defend_goal', 'steal_ball', 'block_opponent', 'maintain_position',
             'support_teammate', 'preserve_energy', 'take_risks',
             'disperse_from_teammates'
@@ -231,7 +616,6 @@ from typing imporsupport_teammate': 0.8,
         """Get current desire values for debugging/analysis."""
         return {
             'score_goal': self.score_goal,
-            'create_opportunities': self.create_opportunities,
             'move_towards_ball': self.move_towards_ball,
             'defend_goal': self.defend_goal,
             'steal_ball': self.steal_ball,
