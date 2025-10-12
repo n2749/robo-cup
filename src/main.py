@@ -1,4 +1,3 @@
-
 from agents import Defender, Attacker, Goalkeeper, Team, FieldDistribution
 from env import Environment
 from bdi import Actions
@@ -6,6 +5,8 @@ import numpy as np
 import json
 import pickle
 import os
+from pathlib import Path
+import csv
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import time
@@ -285,98 +286,129 @@ def train(config: FieldDistribution, training_config: Optional[TrainingConfig] =
         print(f"Starting new training session with {len(config.agents)} agents")
         print(f"Training for {training_config.num_episodes} episodes")
         print(f"Checkpoints every {training_config.checkpoint_frequency} episodes")
-    
-    # Initialize environment
-    env = config.agents[0].env if config.agents else Environment()
-    
-    # Track early stopping
-    episodes_without_improvement = 0
-    best_performance_episode = start_episode
-    
+
     try:
-        for episode in range(start_episode, training_config.num_episodes):
-            episode_start_time = time.time()
-            
-            # Reset environment and agents for new episode
-            observations = env.reset()
-            for agent in config.agents:
-                agent.reset_episode()
-            
-            total_episode_reward = 0
-            collision_count = 0
-            episode_length = 0
-            
-            # Episode loop
-            for step in range(training_config.max_episode_steps):
-                # Get actions from all agents using BDI + Q-learning
-                actions = []
-                for agent in config.agents:
-                    action = agent.act()
-                    actions.append(action)
-                
-                # Execute environment step
-                observations, rewards, done, info = env.step(actions)
-                
-                # Update agents with rewards and new observations
-                for agent, reward in zip(config.agents, rewards):
-                    agent.learn(reward, done)
-                    total_episode_reward += reward
-                
-                collision_count += len(info.get('collisions', []))
-                episode_length = step + 1
-                
-                if done:
-                    break
-            
-            episode_time = time.time() - episode_start_time
-            
-            # Calculate episode statistics
-            avg_q_table_size = np.mean([len(agent.q_policy.Q) for agent in config.agents])
-            avg_exploration_rate = np.mean([agent.q_policy.eps for agent in config.agents])
-            
-            # Update training statistics
-            stats.update_episode_stats(
-                episode_reward=total_episode_reward,
-                episode_length=episode_length,
-                goals=info.get('score', {'blue': 0, 'white': 0}),
-                q_table_size=avg_q_table_size,
-                exploration_rate=avg_exploration_rate,
-                collision_count=collision_count,
-                episode_time=episode_time
+        csv_path = Path("history.csv")
+        with csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "episode",
+                    "avg_q_table_size",
+                    "avg_exploration_rate",
+                    "total_episode_reward",
+                    "episode_length",
+                    "blue_goals",
+                    "white_goals",
+                    "collision_count",
+                    "episode_time_sec",
+                ],
             )
+            if f.tell() == 0:
+                writer.writeheader()
+     
+            # Initialize environment
+            env = config.agents[0].env if config.agents else Environment()
             
-            # Print progress
-            if (episode + 1) % training_config.stats_frequency == 0:
-                print_training_progress(episode + 1, stats, training_config)
-            
-            # Save checkpoint
-            if (episode + 1) % training_config.checkpoint_frequency == 0:
-                checkpoint_path = save_checkpoint(config, episode + 1, stats, training_config)
+            # Track early stopping
+            episodes_without_improvement = 0
+            best_performance_episode = start_episode
+        
+            for episode in range(start_episode, training_config.num_episodes):
+                episode_start_time = time.time()
                 
-                # Check for improvement
-                current_win_rate = stats.calculate_win_rate()
-                if current_win_rate > stats.best_win_rate:
-                    best_performance_episode = episode + 1
-                    episodes_without_improvement = 0
-                    print(f"New best win rate: {current_win_rate:.2%}")
+                # Reset environment and agents for new episode
+                observations = env.reset()
+                for agent in config.agents:
+                    agent.reset_episode()
+                
+                total_episode_reward = 0
+                collision_count = 0
+                episode_length = 0
+                
+                # Episode loop
+                for step in range(training_config.max_episode_steps):
+                    # Get actions from all agents using BDI + Q-learning
+                    actions = []
+                    for agent in config.agents:
+                        action = agent.act()
+                        actions.append(action)
                     
-                    # Save best model checkpoint
-                    best_checkpoint = checkpoint_path.replace('.pkl', '_BEST.pkl')
-                    os.rename(checkpoint_path, best_checkpoint)
-                    print(f"Best model saved: {os.path.basename(best_checkpoint)}")
-                else:
-                    episodes_without_improvement += training_config.checkpoint_frequency
-            
-            # Early stopping check
-            if episodes_without_improvement >= training_config.early_stopping_patience:
-                print(f"\nEarly stopping: No improvement for {episodes_without_improvement} episodes")
-                break
+                    # Execute environment step
+                    observations, rewards, done, info = env.step(actions)
+                    
+                    # Update agents with rewards and new observations
+                    for agent, reward in zip(config.agents, rewards):
+                        agent.learn(reward, done)
+                        total_episode_reward += reward
+                    
+                    collision_count += len(info.get('collisions', []))
+                    episode_length = step + 1
+                    
+                    if done:
+                        break
                 
-            # Target performance reached
-            current_win_rate = stats.calculate_win_rate()
-            if current_win_rate >= training_config.target_win_rate:
-                print(f"\nTarget win rate {training_config.target_win_rate:.2%} achieved!")
-                break
+                episode_time = time.time() - episode_start_time
+                
+                # Calculate episode statistics
+                avg_q_table_size = np.mean([len(agent.q_policy.Q) for agent in config.agents])
+                avg_exploration_rate = np.mean([agent.q_policy.eps for agent in config.agents])
+                
+                # Update training statistics
+                stats.update_episode_stats(
+                    episode_reward=total_episode_reward,
+                    episode_length=episode_length,
+                    goals=info.get('score', {'blue': 0, 'white': 0}),
+                    q_table_size=avg_q_table_size,
+                    exploration_rate=avg_exploration_rate,
+                    collision_count=collision_count,
+                    episode_time=episode_time
+                )
+                goals = info.get('score', {'blue': 0, 'white': 0})
+                # Print prog
+                writer.writerow({
+                    "episode": episode,
+                    "avg_q_table_size": f"{avg_q_table_size:.2f}",
+                    "avg_exploration_rate": f"{avg_exploration_rate:.2f}",
+                    "total_episode_reward": f"{total_episode_reward:.2f}",
+                    "episode_length": episode_length,
+                    "blue_goals": goals["blue"],
+                    "white_goals": goals["white"],
+                    "collision_count": collision_count,
+                    "episode_time_sec": f"{episode_time:.2f}",
+                })
+                f.flush()  # optional but helpful to persist immediatelyress
+                if (episode + 1) % training_config.stats_frequency == 0:
+                    print_training_progress(episode + 1, stats, training_config)
+                
+                # Save checkpoint
+                if (episode + 1) % training_config.checkpoint_frequency == 0:
+                    checkpoint_path = save_checkpoint(config, episode + 1, stats, training_config)
+                    
+                    # Check for improvement
+                    current_win_rate = stats.calculate_win_rate()
+                    if current_win_rate > stats.best_win_rate:
+                        best_performance_episode = episode + 1
+                        episodes_without_improvement = 0
+                        print(f"New best win rate: {current_win_rate:.2%}")
+                        
+                        # Save best model checkpoint
+                        best_checkpoint = checkpoint_path.replace('.pkl', '_BEST.pkl')
+                        os.rename(checkpoint_path, best_checkpoint)
+                        print(f"Best model saved: {os.path.basename(best_checkpoint)}")
+                    else:
+                        episodes_without_improvement += training_config.checkpoint_frequency
+                
+                # Early stopping check
+                if episodes_without_improvement >= training_config.early_stopping_patience:
+                    print(f"\nEarly stopping: No improvement for {episodes_without_improvement} episodes")
+                    break
+                    
+                # # Target performance reached
+                # current_win_rate = stats.calculate_win_rate()
+                # if current_win_rate >= training_config.target_win_rate:
+                #     print(f"\nTarget win rate {training_config.target_win_rate:.2%} achieved!")
+                #     break
     
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")

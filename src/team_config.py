@@ -148,23 +148,24 @@ def create_team(team: Team, formation: SoccerFormation, env: Environment) -> Lis
     positions = formation.get_positions(team, env.width, env.height)
     
     for role, position in positions:
+        print(f"role={role} position={position}")
         if role == "goalkeeper":
-            agent = Goalkeeper(env, team, pos=position)
+            agent = Goalkeeper(env, team, base_pos=position)
         elif role == "defender":
-            agent = Defender(env, team, pos=position)
+            agent = Defender(env, team, base_pos=position)
         elif role == "midfielder":
-            agent = Midfielder(env, team, pos=position)
+            agent = Midfielder(env, team, base_pos=position)
         elif role == "attacker":
-            agent = Attacker(env, team, pos=position)
+            agent = Attacker(env, team, base_pos=position)
         else:
-            agent = Midfielder(env, team, pos=position)  # Default
+            agent = Midfielder(env, team, base_pos=position)  # Default
             
         agents.append(agent)
     
     return agents
 
 
-def create_11v11_field_distribution(blue_formation=None, white_formation=None) -> FieldDistribution:
+def create_11v11_field_distribution(blue_formation=Formation442(), white_formation=Formation442()) -> FieldDistribution:
     """
     Create a complete 11v11 field distribution with specified formations.
     
@@ -175,11 +176,6 @@ def create_11v11_field_distribution(blue_formation=None, white_formation=None) -
     Returns:
         FieldDistribution with 22 agents
     """
-    # Default formations
-    if blue_formation is None:
-        blue_formation = Formation442()
-    if white_formation is None:
-        white_formation = Formation442()
     
     # Create environment
     env = Environment()

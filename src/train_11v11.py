@@ -25,7 +25,7 @@ def create_11v11_training_config(
     eps_end: float = 0.02,  # Lower final exploration for better coordination
     eps_decay: float = 0.999,  # Slower decay for longer exploration
     early_stopping_patience: int = 500,
-    target_win_rate: float = 0.65,
+    target_win_rate: float = 0.8,
     max_episode_steps: int = 1200  # Longer episodes for full teams
 ) -> TrainingConfig:
     """

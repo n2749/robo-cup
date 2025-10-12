@@ -90,6 +90,10 @@ class Environment:
         
         # Reset agents to starting positions (field center at 0,0)
         for i, agent in enumerate(self.agents):
+            # If agent has an initial_pos, use it; otherwise fall back to default layout
+            # if hasattr(agent, 'initial_pos') and agent.initial_pos is not None:
+            #     agent.pos = agent.initial_pos.copy()
+            # else:
             if agent.team.name == 'BLUE':
                 # Blue team starts on left side (negative X)
                 agent.pos = np.array([-self.width * 0.25, (i % 2 - 0.5) * self.height * 0.3])
