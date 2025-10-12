@@ -333,7 +333,6 @@ class Desires:
         self.block_opponent = 0.5
         self.maintain_position = 0.5
         self.support_teammate = 0.5
-        self.preserve_energy = 0.3
         self.take_risks = 0.5
         self.disperse_from_teammates = 0.6  # Desire to maintain spacing
         
@@ -547,7 +546,6 @@ class Desires:
         
         # Energy management (fatigue effects)
         if self.fatigue_factor > 0.3:
-            self.preserve_energy *= (1.0 + self.fatigue_factor)
             self.take_risks *= (1.0 - self.fatigue_factor * 0.5)
             self.move_towards_ball *= (1.0 - self.fatigue_factor * 0.3)
     
@@ -601,10 +599,9 @@ class Desires:
     def _clamp_desires(self):
         """Ensure all desires stay within reasonable bounds."""
         desire_attributes = [
-            'score_goal', 'move_towards_ball',
-            'defend_goal', 'steal_ball', 'block_opponent', 'maintain_position',
-            'support_teammate', 'preserve_energy', 'take_risks',
-            'disperse_from_teammates'
+            'score_goal', 'move_towards_ball', 'defend_goal', 'steal_ball',
+            'block_opponent', 'maintain_position', 'support_teammate',
+            'take_risks', 'disperse_from_teammates'
         ]
         
         for attr in desire_attributes:
@@ -621,7 +618,6 @@ class Desires:
             'block_opponent': self.block_opponent,
             'maintain_position': self.maintain_position,
             'support_teammate': self.support_teammate,
-            'preserve_energy': self.preserve_energy,
             'take_risks': self.take_risks,
             'disperse_from_teammates': self.disperse_from_teammates,
             'desperation_factor': self.desperation_factor,
@@ -668,10 +664,9 @@ class Desires:
             bias += self.defend_goal
             if beliefs.in_defensive_third:
                 bias += 0.2
-                
+
         elif action == Actions.STAY:
-            bias += self.preserve_energy
-            bias -= 0.1  # Generally discourage staying idle
+            bias += self.fatigue_factor
         
         return bias
 
