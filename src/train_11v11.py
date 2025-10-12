@@ -42,7 +42,7 @@ def create_11v11_training_config(
         num_episodes=num_episodes,
         checkpoint_frequency=checkpoint_frequency,
         stats_frequency=stats_frequency,
-        save_directory="checkpoints_11v11",
+        save_directory="checkpoints/11v11",
         max_episode_steps=max_episode_steps,
         learning_rate=learning_rate,
         gamma=gamma,

@@ -287,7 +287,10 @@ class Agent(ABC):
             'my_team_score': my_score,
             'opponent_score': opponent_score,
             'time_remaining': time_remaining,
-            'ball_possession': ball_possession
+            'ball_possession': ball_possession,
+            'teammates_too_close': self.beliefs.teammates_too_close,
+            'teammates_nearby': self.beliefs.teammates_nearby,
+            'closest_teammate_distance': self.beliefs.closest_teammate_distance
         }
     
     
