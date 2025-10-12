@@ -11,8 +11,6 @@ class QLearningPolicy:
     Q-learning policy adapted for soccer simulation with BDI architecture.
     Handles discrete state-action space for soccer agent decision making.
     """
-
-    # unique_pos = []
     
     def __init__(
         self,
