@@ -153,7 +153,8 @@ def save_checkpoint(config: FieldDistribution, episode: int, stats: TrainingStat
         agent_data = {
             'role': agent.role,
             'team': agent.team.name,
-            'position': agent.pos.tolist(),
+            'base_pos': agent.base_pos.tolist(),
+            'pos': agent.pos.tolist(),
             'q_table': dict(agent.q_policy.Q),  # Convert defaultdict to regular dict
             'q_policy_params': {
                 'alpha': agent.q_policy.alpha,

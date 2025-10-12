@@ -631,16 +631,17 @@ class SoccerVisualizer:
             self.agents = []
             for i, agent_data in enumerate(checkpoint_data['agents']):
                 team = Team.BLUE if agent_data['team'] == 'BLUE' else Team.WHITE
-                pos = np.array(agent_data['position'])
+                pos = np.array(agent_data['pos'])
+                base_pos = np.array(agent_data['base_pos'])
                 
                 if agent_data['role'] == 'attacker':
-                    agent = Attacker(self.env, team, pos=pos)
+                    agent = Attacker(self.env, team, pos=pos, base_pos=base_pos)
                 elif agent_data['role'] == 'defender':
-                    agent = Defender(self.env, team, pos=pos)
+                    agent = Defender(self.env, team, pos=pos, base_pos=base_pos)
                 elif agent_data['role'] == 'goalkeeper':
-                    agent = Goalkeeper(self.env, team, pos=pos)
+                    agent = Goalkeeper(self.env, team, pos=pos, base_pos=base_pos)
                 else:
-                    agent = Attacker(self.env, team, pos=pos)  # Default
+                    agent = Attacker(self.env, team, pos=pos, base_pos=base_pos)  # Default
                 
                 # Restore Q-learning state
                 for key, value in agent_data['q_table'].items():
