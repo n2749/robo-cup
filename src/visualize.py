@@ -432,14 +432,8 @@ class SoccerVisualizer:
             
             desires = agent.desires.get_current_desires_summary()
             desire_lines = [
-                f"Score Goal: {desires.get('score_goal', 0):.2f}",
-                f"Move to Ball: {desires.get('move_towards_ball', 0):.2f}",
-                f"Defend Goal: {desires.get('defend_goal', 0):.2f}",
-                f"Steal Ball: {desires.get('steal_ball', 0):.2f}",
-                f"Support Team: {desires.get('support_teammate', 0):.2f}",
-                f"Take Risks: {desires.get('take_risks', 0):.2f}",
-                f"Desperation: {desires.get('desperation_factor', 0):.2f}",
-                f"Confidence: {desires.get('confidence_factor', 0):.2f}",
+                f"{name.capitalize()}: {value:.2f}"
+                for name, value in desires.items()
             ]
             
             for line in desire_lines:

@@ -303,7 +303,7 @@ class Environment:
                 
                 # Combine ball attraction with dispersion
                 # Strong dispersion desire overrides ball attraction when clustering
-                if hasattr(agent, 'desires') and agent.desires.disperse_from_teammates > 1.0:
+                if hasattr(agent, 'desires') and agent.desires.get_value(Actions.STAY) > 1.0:
                     # Prioritize dispersion when strong clustering desire
                     force = dispersion_force * 0.7 + ball_force * 0.3
                 else:
@@ -1133,4 +1133,3 @@ class Environment:
                 if np.linalg.norm(direction) > 0:
                     direction = direction / np.linalg.norm(direction)
                     self.ball_vel = direction * 10.0
-

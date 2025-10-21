@@ -312,96 +312,75 @@ class Desires:
     Represents an agent's dynamic desires/goals in the BDI architecture.
     Desires adapt to game state, role, and tactical situations in real-time.
     These influence action selection and can be used to bias Q-learning rewards.
+    The desire set is kept aligned with the available action space by tracking
+    a single scalar preference per action.
     """
     
     def __init__(self, role: str = "midfielder"):
-        # Base desires (role-dependent defaults)
         self.role = role
-
-        # PASS = 1
-        # TACKLE = 2
-        # SHOOT = 3
-        # BLOCK = 4
-        # MOVE = 5
-        # STAY = 6
-        
-        # Current dynamic desires (updated each cycle)
-        self.score_goal = 0.5
-        self.move_towards_ball = 0.5
-        self.defend_goal = 0.5
-        self.steal_ball = 0.5
-        self.block_opponent = 0.5
-        self.maintain_position = 0.5
-        self.support_teammate = 0.5
-        self.take_risks = 0.5
-        self.disperse_from_teammates = 0.6  # Desire to maintain spacing
+        self.fatigue_factor = 0.0  # Increases over time
+        self.desires: Dict['Actions', float] = {action: 0.5 for action in Actions}
         
         # Base role desires (used as baseline)
         self.base_desires = self._get_base_desires_for_role(role)
-        
-        # Game state modifiers
-        self.desperation_factor = 0.0  # Increases when losing
-        self.confidence_factor = 1.0   # Increases when winning
-        self.fatigue_factor = 0.0      # Increases over time
-        
-        # Initialize with base desires
         self._apply_base_desires()
+    
+    def get_value(self, action: 'Actions') -> float:
+        """Get the current desire strength for a specific action."""
+        return self.desires.get(action, 0.0)
+    
+    def set_value(self, action: 'Actions', value: float):
+        """Set the desire strength for a specific action."""
+        self.desires[action] = value
+    
+    def _scale_desire(self, action: 'Actions', factor: float):
+        """Scale the desire value for an action by a multiplier."""
+        self.desires[action] = self.get_value(action) * factor
     
     def _get_base_desires_for_role(self, role: str) -> dict:
         """Get base desire values for a specific role."""
         if role == 'attacker':
             return {
-                'score_goal': 1.0,
-                'move_towards_ball': 0.9,
-                'defend_goal': 0.3,
-                'take_risks': 0.7,
-                'steal_ball': 0.4,
-                'block_opponent': 0.3,
-                'maintain_position': 0.4,
-                'support_teammate': 0.6,
-                'disperse_from_teammates': 0.5
+                Actions.SHOOT: 1.0,
+                Actions.PASS: 0.9,
+                Actions.MOVE: 0.8,
+                Actions.TACKLE: 0.4,
+                Actions.BLOCK: 0.3,
+                Actions.STAY: 0.2,
             }
         elif role == 'defender':
             return {
-                'defend_goal': 1.0,
-                'steal_ball': 0.9,
-                'block_opponent': 0.8,
-                'score_goal': 0.2,
-                'take_risks': 0.2,
-                'move_towards_ball': 0.5,
-                'maintain_position': 0.8,
-                'support_teammate': 0.7,
-                'disperse_from_teammates': 0.8
+                Actions.SHOOT: 0.2,
+                Actions.PASS: 0.5,
+                Actions.MOVE: 0.6,
+                Actions.TACKLE: 0.9,
+                Actions.BLOCK: 0.8,
+                Actions.STAY: 0.7,
             }
         elif role == 'goalkeeper':
             return {
-                'defend_goal': 1.0,
-                'block_opponent': 1.0,
-                'steal_ball': 0.6,
-                'score_goal': 0.0,
-                'take_risks': 0.1,
-                'move_towards_ball': 0.3,
-                'maintain_position': 0.9,
-                'support_teammate': 0.5,
-                'disperse_from_teammates': 0.3
+                Actions.SHOOT: 0.0,
+                Actions.PASS: 0.5,
+                Actions.MOVE: 0.4,
+                Actions.TACKLE: 0.6,
+                Actions.BLOCK: 1.0,
+                Actions.STAY: 0.9,
             }
         else:  # midfielder
             return {
-                'support_teammate': 0.8,
-                'take_risks': 0.5,
-                'score_goal': 0.6,
-                'defend_goal': 0.6,
-                'move_towards_ball': 0.7,
-                'steal_ball': 0.6,
-                'block_opponent': 0.5,
-                'maintain_position': 0.6,
-                'disperse_from_teammates': 0.7
+                Actions.SHOOT: 0.6,
+                Actions.PASS: 0.8,
+                Actions.MOVE: 0.7,
+                Actions.TACKLE: 0.6,
+                Actions.BLOCK: 0.5,
+                Actions.STAY: 0.6,
             }
     
     def _apply_base_desires(self):
         """Apply base desires for the agent's role."""
-        for desire, value in self.base_desires.items():
-            setattr(self, desire, value)
+        for action in Actions:
+            base_value = self.base_desires.get(action, 0.5)
+            self.desires[action] = base_value
     
     def update_desires_based_on_game_state(self, beliefs: Beliefs, game_info: dict):
         """
@@ -425,22 +404,7 @@ class Desires:
         score_difference = my_score - opponent_score
         is_losing = score_difference < 0
         is_winning = score_difference > 0
-        is_tied = score_difference == 0
         time_pressure = 1.0 - game_time_remaining  # Higher when less time remaining
-        
-        # Update desperation and confidence factors
-        if is_losing:
-            self.desperation_factor = min(1.0, abs(score_difference) * 0.3 + time_pressure * 0.5)
-            self.confidence_factor = max(0.5, 1.0 - self.desperation_factor)
-        elif is_winning:
-            self.confidence_factor = min(1.5, 1.0 + score_difference * 0.2)
-            self.desperation_factor = max(0.0, time_pressure * 0.3 - 0.1)
-        else:  # tied
-            self.desperation_factor = time_pressure * 0.4
-            self.confidence_factor = 1.0
-        
-        # Update fatigue factor (could be enhanced with actual agent energy)
-        self.fatigue_factor = min(0.5, (1.0 - game_time_remaining) * 0.6)
         
         # Apply situational modifications
         self._apply_situational_modifications(beliefs, ball_possession, is_losing, is_winning, time_pressure)
@@ -457,97 +421,74 @@ class Desires:
         # Ensure desires stay within reasonable bounds [0, 1.5]
         self._clamp_desires()
     
-    def _apply_situational_modifications(self, beliefs: Beliefs, ball_possession: str, 
-                                       is_losing: bool, is_winning: bool, time_pressure: float):
+    def _apply_situational_modifications(self, beliefs: Beliefs, ball_possession: str,
+                                          is_losing: bool, is_winning: bool, time_pressure: float):
         """Apply modifications based on game situation."""
         
-        # When losing - increase attacking desires
-        if is_losing:
-            self.score_goal *= (1.0 + self.desperation_factor * 0.5)
-            self.take_risks *= (1.0 + self.desperation_factor * 0.4)
-            self.move_towards_ball *= (1.0 + self.desperation_factor * 0.3)
-            self.defend_goal *= (1.0 - self.desperation_factor * 0.2)  # Less defensive when desperate
-            
-        # When winning - more conservative
-        elif is_winning:
-            self.defend_goal *= self.confidence_factor
-            self.take_risks *= (1.0 - (self.confidence_factor - 1.0) * 0.3)
-            
         # Time pressure effects
         if time_pressure > 0.7:  # Last 30% of game
             if is_losing:
                 # Desperate attacking in final minutes
-                self.score_goal *= (1.0 + time_pressure * 0.8)
-                self.take_risks *= (1.0 + time_pressure * 0.6)
+                self._scale_desire(Actions.SHOOT, 1.0 + time_pressure * 0.8)
+                self._scale_desire(Actions.PASS, 1.0 + time_pressure * 0.4)
             elif is_winning:
                 # Defensive in final minutes when winning
-                self.defend_goal *= (1.0 + time_pressure * 0.4)
-                self.maintain_position *= (1.0 + time_pressure * 0.3)
-                self.take_risks *= (1.0 - time_pressure * 0.4)
+                self._scale_desire(Actions.BLOCK, 1.0 + time_pressure * 0.4)
+                self._scale_desire(Actions.STAY, 1.0 + time_pressure * 0.3)
+                self._scale_desire(Actions.SHOOT, max(0.1, 1.0 - time_pressure * 0.4))
         
         # Ball possession effects
         if ball_possession == 'opponent':
             # Increase defensive desires when opponent has ball
-            self.steal_ball *= 1.4
-            self.block_opponent *= 1.3
-            self.defend_goal *= 1.2
-            self.score_goal *= 0.8
+            self._scale_desire(Actions.TACKLE, 1.4)
+            self._scale_desire(Actions.BLOCK, 1.3)
+            self._scale_desire(Actions.SHOOT, 0.8)
         elif ball_possession == 'my_team':
             # Increase attacking desires when we have ball
-            self.score_goal *= 1.2
-            self.support_teammate *= 1.2
-            self.steal_ball *= 0.7
+            self._scale_desire(Actions.SHOOT, 1.2)
+            self._scale_desire(Actions.PASS, 1.2)
+            self._scale_desire(Actions.TACKLE, 0.7)
     
     def _apply_positional_modifications(self, beliefs: Beliefs):
         """Apply modifications based on field position."""
         
         # In attacking third - more attacking desires
         if beliefs.in_attacking_third:
-            self.score_goal *= 1.4
-            self.take_risks *= 1.2
-            self.defend_goal *= 0.7
-            
+            self._scale_desire(Actions.SHOOT, 1.4)
+            self._scale_desire(Actions.PASS, 1.1)
+            self._scale_desire(Actions.BLOCK, 0.7)
+        
         # In defensive third - more defensive desires
         if beliefs.in_defensive_third:
-            self.defend_goal *= 1.5
-            self.block_opponent *= 1.3
-            self.steal_ball *= 1.2
-            self.score_goal *= 0.6
-            self.take_risks *= 0.7
+            self._scale_desire(Actions.BLOCK, 1.5)
+            self._scale_desire(Actions.TACKLE, 1.2)
+            self._scale_desire(Actions.SHOOT, 0.6)
         
         # Close to ball - increase ball-related desires
-        if beliefs.distance_to_ball and beliefs.distance_to_ball >= 4:
-            self.move_towards_ball *= 1.3
-            if beliefs.distance_to_ball < 3.0:
-                if beliefs.goal_open:
-                    self.score_goal *= 1.6
+        if beliefs.distance_to_ball is not None:
+            if beliefs.distance_to_ball >= 4:
+                self._scale_desire(Actions.MOVE, 1.3)
+            if beliefs.distance_to_ball < 3.0 and beliefs.goal_open:
+                self._scale_desire(Actions.SHOOT, 1.6)
         
         # Opponent threatening - emergency defense
         if beliefs.opponent_threatening:
-            self.defend_goal *= 1.8
-            self.block_opponent *= 1.6
-            self.steal_ball *= 1.5
-            self.score_goal *= 0.5
-            self.take_risks *= 0.4
+            self._scale_desire(Actions.BLOCK, 1.6)
+            self._scale_desire(Actions.TACKLE, 1.5)
+            self._scale_desire(Actions.SHOOT, 0.5)
     
     def _apply_tactical_modifications(self, beliefs: Beliefs, ball_possession: str):
         """Apply modifications based on tactical situation."""
         
         # Teammate support
         if beliefs.teammate_open:
-            self.support_teammate *= 1.4
+            self._scale_desire(Actions.PASS, 1.4)
         
         # Goal opportunity
         if beliefs.goal_open:
-            self.score_goal *= 1.8
-            self.take_risks *= 1.5
+            self._scale_desire(Actions.SHOOT, 1.8)
             if beliefs.distance_to_goal and beliefs.distance_to_goal < 20.0:
-                self.score_goal *= 2.0  # Strong desire to score when close and goal open
-        
-        # Energy management (fatigue effects)
-        if self.fatigue_factor > 0.3:
-            self.take_risks *= (1.0 - self.fatigue_factor * 0.5)
-            self.move_towards_ball *= (1.0 - self.fatigue_factor * 0.3)
+                self._scale_desire(Actions.SHOOT, 2.0)  # Strong desire to score when close and goal open
     
     def _apply_spacing_modifications(self, beliefs: Beliefs, game_info: dict):
         """Apply modifications to encourage proper teammate spacing and prevent clustering."""
@@ -556,74 +497,47 @@ class Desires:
         teammates_nearby = game_info.get('teammates_nearby', [])
         teammates_too_close = game_info.get('teammates_too_close', 0)
         
-        # Base dispersion desire already set from role
-        base_disperse = self.disperse_from_teammates
-        
-        # Increase dispersion desire when teammates are too close
+        # Increase movement desire when teammates are too close
         if teammates_too_close > 0:
-            # Strong desire to disperse when clustering occurs
             clustering_factor = min(2.0, 1.0 + teammates_too_close * 0.4)
-            self.disperse_from_teammates *= clustering_factor
-            
-            # Also reduce some competing desires when clustering
-            self.move_towards_ball *= 0.8  # Less focus on ball when need to spread
-            self.support_teammate *= 0.9   # Less direct support, more spacing
+            self._scale_desire(Actions.MOVE, clustering_factor)
+            self._scale_desire(Actions.PASS, 0.9)
         
         # If we're well spaced, maintain current positioning unless urgent
         elif len(teammates_nearby) > 0:
-            # Good spacing - maintain but don't obsess over it
-            self.disperse_from_teammates *= 1.0
-            self.maintain_position *= 1.1  # Slight preference to maintain good position
+            self._scale_desire(Actions.STAY, 1.1)
         
         # Special cases based on game situation
         ball_possession = game_info.get('ball_possession', None)
         
         # When opponent has ball, allow closer spacing for defensive pressing
         if ball_possession == 'opponent':
-            self.disperse_from_teammates *= 0.8  # Allow closer positioning for defense
-            
+            self._scale_desire(Actions.MOVE, 0.9)
+            self._scale_desire(Actions.BLOCK, 1.1)
+        
         # When we have ball, ensure good spacing for passing options
         elif ball_possession == 'my_team':
             if not beliefs.has_ball_possession:  # I don't have ball, but team does
-                self.disperse_from_teammates *= 1.3  # Create passing options
-                self.support_teammate *= 1.2
+                self._scale_desire(Actions.MOVE, 1.2)
+                self._scale_desire(Actions.PASS, 1.2)
         
         # In defensive third, allow closer spacing
         if beliefs.in_defensive_third:
-            self.disperse_from_teammates *= 0.9
-            
+            self._scale_desire(Actions.MOVE, 0.9)
+        
         # In attacking third, need good spacing for opportunities
         elif beliefs.in_attacking_third:
-            self.disperse_from_teammates *= 1.2
+            self._scale_desire(Actions.MOVE, 1.2)
     
     def _clamp_desires(self):
         """Ensure all desires stay within reasonable bounds."""
-        desire_attributes = [
-            'score_goal', 'move_towards_ball', 'defend_goal', 'steal_ball',
-            'block_opponent', 'maintain_position', 'support_teammate',
-            'take_risks', 'disperse_from_teammates'
-        ]
-        
-        for attr in desire_attributes:
-            value = getattr(self, attr, 0.5)
-            setattr(self, attr, max(0.0, min(1.5, value)))
+        for action in Actions:
+            value = self.get_value(action)
+            self.desires[action] = max(0.0, min(1.5, value))
     
     def get_current_desires_summary(self) -> dict:
         """Get current desire values for debugging/analysis."""
-        return {
-            'score_goal': self.score_goal,
-            'move_towards_ball': self.move_towards_ball,
-            'defend_goal': self.defend_goal,
-            'steal_ball': self.steal_ball,
-            'block_opponent': self.block_opponent,
-            'maintain_position': self.maintain_position,
-            'support_teammate': self.support_teammate,
-            'take_risks': self.take_risks,
-            'disperse_from_teammates': self.disperse_from_teammates,
-            'desperation_factor': self.desperation_factor,
-            'confidence_factor': self.confidence_factor,
-            'fatigue_factor': self.fatigue_factor
-        }
+        return {action.name.lower(): self.desires[action] for action in Actions}
     
     def get_action_bias(self, action: 'Actions', beliefs: Beliefs) -> float:
         """
@@ -633,42 +547,32 @@ class Desires:
         Args:
             action: The action to evaluate
             beliefs: Current beliefs
-            
+        
         Returns:
             Bias value (higher = more desired)
         """
-        bias = 0.0
+        bias = self.get_value(action)
         
         if action == Actions.SHOOT:
-            bias += self.score_goal
             if beliefs.goal_open:
                 bias += 0.3
-                
         elif action == Actions.PASS:
             if beliefs.teammate_open:
                 bias += 0.2
-                
         elif action == Actions.MOVE:
-            bias += self.move_towards_ball
             if beliefs.distance_to_ball and beliefs.distance_to_ball > 5.0:
                 bias += 0.2
-            # Add bias for dispersing from teammates
-            bias += self.disperse_from_teammates * 0.5
-                
         elif action == Actions.TACKLE:
-            bias += self.steal_ball
             if beliefs.opponent_threatening:
                 bias += 0.3
-                
         elif action == Actions.BLOCK:
-            bias += self.defend_goal
             if beliefs.in_defensive_third:
                 bias += 0.2
-
         elif action == Actions.STAY:
             bias += self.fatigue_factor
         
         return bias
+
 
 
 class Intentions:
@@ -791,16 +695,16 @@ class BDIReasoningEngine:
         
         # Offensive options
         if beliefs.has_ball_possession:
-            if beliefs.goal_open and desires.score_goal > 0.5:
+            if beliefs.goal_open and desires.get_value(Actions.SHOOT) > 0.5:
                 options.append(Actions.SHOOT)
-            if beliefs.teammate_open and desires.support_teammate > 0.4:
+            if beliefs.teammate_open and desires.get_value(Actions.PASS) > 0.4:
                 options.append(Actions.PASS)
                 
         # Defensive options
         if not beliefs.team_has_possession:
-            if beliefs.distance_to_opponent and beliefs.distance_to_opponent < 8.0:
+            if beliefs.distance_to_opponent and beliefs.distance_to_opponent < 8.0 and desires.get_value(Actions.TACKLE) > 0.3:
                 options.append(Actions.TACKLE)
-            if beliefs.in_defensive_third:
+            if beliefs.in_defensive_third and desires.get_value(Actions.BLOCK) > 0.3:
                 options.append(Actions.BLOCK)
                 
         # Always have option to stay (though usually not preferred)
