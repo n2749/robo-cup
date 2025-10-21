@@ -66,6 +66,10 @@ class Environment:
 
         # Track last touch for better set-piece decisions
         self.last_touch_team = None
+        self.last_pass_context = None
+        self.pass_calibration_error = 0.5  # Running MAE of predictions
+        self.pass_calibration_count = 0
+        self.last_pass_context = None
         
         # Movement: P1 = P0 + V0; V1 = V0 + A0; A1 = FORCE * K1 - V0 * K2
         self.K1 = 0.05  # Force scaling factor (slightly increased for better control)
@@ -119,6 +123,10 @@ class Environment:
 
         # Reset last touch
         self.last_touch_team = None
+        self.last_pass_context = None
+        self.pass_calibration_error = 0.5
+        self.pass_calibration_count = 0
+        self.last_pass_context = None
         
         return self._get_observations()
     
@@ -334,7 +342,21 @@ class Environment:
             teammates = [a for a in self.agents if a.team == agent.team and a != agent]
             if teammates:
                 nearest_teammate = min(teammates, key=lambda tm: np.linalg.norm(agent.pos - tm.pos))
+                target_id = id(nearest_teammate)
+                prediction = None
+                if hasattr(agent, 'evaluate_pass'):
+                    prediction = agent.evaluate_pass(nearest_teammate)
+                    target_id = prediction.get("target_id", target_id)
+                self.last_pass_context = {
+                    "passer": agent,
+                    "target_id": target_id,
+                    "target_agent": nearest_teammate,
+                    "probability": prediction.get("probability") if prediction else None,
+                    "confidence": prediction.get("confidence_score") if prediction else None,
+                }
                 self._pass_ball(agent, nearest_teammate)
+            else:
+                self.last_pass_context = None
                 
         elif action == Actions.SHOOT and agent.has_ball:
             # Shoot towards goal
@@ -454,6 +476,25 @@ class Environment:
                     self.ball_vel = np.zeros(2)  # Ball stops when possessed
                     # Update last touch team on possession
                     self.last_touch_team = agent.team
+                    if self.last_pass_context:
+                        passer = self.last_pass_context.get("passer")
+                        target_id = self.last_pass_context.get("target_id")
+                        target_agent = self.last_pass_context.get("target_agent")
+                        predicted_prob = self.last_pass_context.get("probability")
+                        if passer is not None and hasattr(passer, "record_pass_outcome"):
+                            success = target_id == id(agent)
+                            passer.record_pass_outcome(success)
+                            # Update receiver skill if tracking
+                            if target_agent is not None and hasattr(target_agent, "record_receive_outcome"):
+                                target_agent.record_receive_outcome(success)
+                            # Update environment calibration metrics
+                            if predicted_prob is not None:
+                                outcome = 1.0 if success else 0.0
+                                error = abs(outcome - predicted_prob)
+                                alpha = 0.2
+                                self.pass_calibration_error = (1 - alpha) * self.pass_calibration_error + alpha * error
+                                self.pass_calibration_count += 1
+                        self.last_pass_context = None
                     break
     
     def _check_goals(self) -> bool:
