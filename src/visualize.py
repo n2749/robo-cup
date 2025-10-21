@@ -442,6 +442,33 @@ class SoccerVisualizer:
             
             y += 10
         
+        # Pass prediction section
+        if hasattr(agent, 'last_pass_prediction'):
+            prediction = agent.last_pass_prediction
+            if prediction.get('probability') is not None:
+                section_surface = self.font.render("PASS PREDICT", True, DARK_GREEN)
+                self.screen.blit(section_surface, (x_margin, y))
+                y += 25
+                
+                prob = prediction['probability'] * 100.0
+                confidence_label = prediction.get('confidence_label', 'Unknown')
+                confidence_score = prediction.get('confidence_score', 0.0)
+                target_role = prediction.get('features', {}).get('target_role', 'n/a')
+                pass_type = prediction.get('features', {}).get('pass_type', 'n/a')
+                lines = [
+                    f"Prob: {prob:.1f}%",
+                    f"Confidence: {confidence_label} ({confidence_score:.2f})",
+                    f"Target Role: {target_role}",
+                    f"Pass Type: {pass_type}",
+                    f"Skill: {getattr(agent, 'pass_skill', 1.0):.2f}",
+                ]
+                
+                for line in lines:
+                    self.screen.blit(self.small_font.render(line, True, BLACK), (x_margin, y))
+                    y += 16
+                
+                y += 10
+        
         # Intentions section
         if hasattr(agent, 'intentions'):
             section_surface = self.font.render("INTENTIONS", True, DARK_GREEN)
