@@ -455,12 +455,20 @@ class SoccerVisualizer:
                 confidence_score = prediction.get('confidence_score', 0.0)
                 target_role = prediction.get('features', {}).get('target_role', 'n/a')
                 pass_type = prediction.get('features', {}).get('pass_type', 'n/a')
+                receiver_skill = prediction.get('features', {}).get('receiver_skill')
+                calibration_error = getattr(agent.env, 'pass_calibration_error', 0.5) if hasattr(agent, 'env') else 0.5
+                pass_success_rate = (agent.pass_successes / agent.pass_attempts) * 100.0 if agent.pass_attempts else 0.0
+                receive_success_rate = (agent.receive_successes / agent.receive_attempts) * 100.0 if agent.receive_attempts else 0.0
                 lines = [
                     f"Prob: {prob:.1f}%",
                     f"Confidence: {confidence_label} ({confidence_score:.2f})",
                     f"Target Role: {target_role}",
                     f"Pass Type: {pass_type}",
                     f"Skill: {getattr(agent, 'pass_skill', 1.0):.2f}",
+                    f"Recv Skill: {getattr(agent, 'receive_skill', 1.0):.2f}",
+                    f"Pass SR: {pass_success_rate:.0f}% ({agent.pass_successes}/{agent.pass_attempts})",
+                    f"Recv SR: {receive_success_rate:.0f}% ({agent.receive_successes}/{agent.receive_attempts})",
+                    f"Calib Err: {calibration_error:.2f}",
                 ]
                 
                 for line in lines:

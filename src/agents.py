@@ -67,15 +67,27 @@ class Agent(ABC):
             "defender": 0.95,
             "goalkeeper": 0.85,
         }
+        role_receive_defaults = {
+            "attacker": 1.1,
+            "midfielder": 1.0,
+            "defender": 0.95,
+            "goalkeeper": 0.9,
+        }
         self.pass_skill = role_skill_defaults.get(role, 1.0)
         self.pass_attempts = 0
         self.pass_successes = 0
+        self.receive_skill = role_receive_defaults.get(role, 1.0)
+        self.receive_attempts = 0
+        self.receive_successes = 0
         self.last_pass_prediction = {
             "probability": None,
             "confidence_label": "Unknown",
             "confidence_score": 0.0,
             "features": {},
             "target_id": None,
+            "target_role": None,
+            "receiver_skill": None,
+            "outcome": None,
         }
     
     def _setup_zones(self):
@@ -183,6 +195,9 @@ class Agent(ABC):
         """
         prediction = predict_pass_success(self, receiver, self.env)
         prediction["target_id"] = id(receiver)
+        prediction["target_role"] = getattr(receiver, "role", None)
+        prediction["receiver_skill"] = getattr(receiver, "receive_skill", None)
+        prediction["outcome"] = None
         self.last_pass_prediction = prediction
         self.pass_attempts += 1
         return prediction
@@ -196,6 +211,19 @@ class Agent(ABC):
             self.pass_skill = min(1.4, self.pass_skill + 0.02)
         else:
             self.pass_skill = max(0.6, self.pass_skill - 0.02)
+        if self.last_pass_prediction:
+            self.last_pass_prediction["outcome"] = success
+    
+    def record_receive_outcome(self, success: bool):
+        """
+        Track first-touch ability and adjust receiver skill over time.
+        """
+        self.receive_attempts += 1
+        if success:
+            self.receive_successes += 1
+            self.receive_skill = min(1.4, self.receive_skill + 0.015)
+        else:
+            self.receive_skill = max(0.6, self.receive_skill - 0.015)
     
     def deliberate(self) -> List[Actions]:
         """
